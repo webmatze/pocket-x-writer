@@ -42,6 +42,13 @@ uint32_t gPendingSince = 0;
 bool gDirty = false;
 bool gScanRequested = false;
 uint32_t gConnectStartedAt = 0;
+// Hunt mode: keep scanning and report devices the moment they appear, instead
+// of once at the end of a fixed window. A keyboard advertises in bursts and may
+// well be quiet during any single 8 s scan -- macOS finds it because its
+// settings panel listens continuously, so we do the same.
+bool gHunting = false;
+uint32_t gHuntUntil = 0;
+uint8_t gReported = 0;
 
 char gLine[512];
 uint16_t gLineLen = 0;
@@ -130,6 +137,32 @@ void handleScanResults() {
   listDevices();
 }
 
+void pollHunt() {
+  if (!gHunting) return;
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+
+  // Report anything new the instant it lands, so a burst-advertising keyboard
+  // is visible even if it goes quiet again a second later.
+  const uint8_t n = ble.deviceCount();
+  for (uint8_t i = gReported; i < n; ++i) {
+    const auto& d = ble.device(i);
+    const bool interesting = d.hid || d.rssi > -65;
+    Serial.printf("%s %2u %-24s %-18s rssi=%4d %s%s\n", interesting ? "  >>>" : "     ", i, d.name, d.addr,
+                  d.rssi, d.hid ? "HID " : "", d.connectable ? "" : "(not connectable)");
+    if (interesting)
+      Serial.printf("      ^ candidate — connect with: c%u\n", i);
+  }
+  gReported = n;
+
+  if (!ble.isScanning() && (int32_t)(gHuntUntil - millis()) > 0) ble.startScan(15000);
+  if ((int32_t)(gHuntUntil - millis()) <= 0) {
+    gHunting = false;
+    ble.stopScan();
+    Serial.println("[ble] hunt over");
+    listDevices();
+  }
+}
+
 // Deliberately NOT automatic. An earlier revision connected to the strongest
 // HID advertiser in range and reached for a neighbour's TV remote: "the only
 // HID device nearby" is not the same as "the user's keyboard". Pairing is a
@@ -156,6 +189,24 @@ void pollSerialCommands() {
         ble.startScan(8000);
         gScanRequested = true;
         break;
+      case 'h':
+        gHunting = true;
+        gHuntUntil = millis() + 90000;
+        gReported = 0;
+        Serial.println("[ble] HUNT: scanning continuously for 90s.");
+        Serial.println("[ble] Put the keyboard into pairing mode NOW — new devices print as they appear.");
+        break;
+      case 'a': {
+        // Connect straight to an address, e.g. from macOS's Bluetooth panel.
+        // connect() tries both address types when it has not seen the device.
+        const char* addr = line + 1;
+        while (*addr == ' ') ++addr;
+        if (strlen(addr) != 17) { Serial.println("[ble] expected: a AA:BB:CC:DD:EE:FF"); break; }
+        Serial.printf("[ble] connecting directly to %s\n", addr);
+        gConnectStartedAt = millis();
+        ble.connect(addr);
+        break;
+      }
       case 'l':
         listDevices();
         break;
@@ -184,7 +235,8 @@ void pollSerialCommands() {
         Serial.println("[ble] disconnected");
         break;
       default:
-        Serial.println("[ble] s=scan  l=list  c<n>=connect  p=pairings  f=forget all  d=disconnect");
+        Serial.println("[ble] s=scan  h=hunt(90s)  l=list  c<n>=connect  a<addr>=connect by address");
+        Serial.println("[ble] p=pairings  f=forget all  d=disconnect");
     }
   }
 }
@@ -243,6 +295,7 @@ void loop() {
   ble.poll();
   pollSwitchButton();
   handleScanResults();
+  pollHunt();
   pollSerialCommands();
   pollConnectTimeout();
 
