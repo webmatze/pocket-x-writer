@@ -218,6 +218,65 @@ void test_invert_off_canvas_is_safe() {
   TEST_ASSERT_TRUE(true);
 }
 
+
+namespace {
+uint8_t g_bits2[kStride * kH];
+Canvas secondCanvas() {
+  memset(g_bits2, 0xFF, sizeof(g_bits2));
+  return Canvas{g_bits2, kW, kH, kStride};
+}
+}  // namespace
+
+void test_diff_of_identical_canvases_is_empty() {
+  Canvas a = freshCanvas();
+  Canvas b = secondCanvas();
+  drawText(a, font, 10, 40, "Hallo");
+  memcpy(b.bits, a.bits, kStride * kH);
+  TEST_ASSERT_TRUE(diffCanvas(a, b).empty());
+}
+
+// The diff must enclose every differing pixel, or the panel would be told to
+// refresh too small an area and leave stale ink behind.
+void test_diff_encloses_every_changed_pixel() {
+  Canvas a = freshCanvas();
+  Canvas b = secondCanvas();
+  drawText(b, font, 10, 40, "Hallo");
+  const Rect d = diffCanvas(a, b);
+  TEST_ASSERT_FALSE(d.empty());
+  for (int y = 0; y < kH; ++y)
+    for (int x = 0; x < kW; ++x) {
+      const bool pa = !((a.bits[(uint32_t)y * kStride + (x >> 3)] >> (7 - (x & 7))) & 1);
+      const bool pb = !((b.bits[(uint32_t)y * kStride + (x >> 3)] >> (7 - (x & 7))) & 1);
+      if (pa != pb) {
+        TEST_ASSERT_TRUE_MESSAGE(x >= d.x && x < d.x + d.w, "changed pixel outside diff columns");
+        TEST_ASSERT_TRUE_MESSAGE(y >= d.y && y < d.y + d.h, "changed pixel outside diff rows");
+      }
+    }
+}
+
+// The panel addresses partial-window columns in bytes, so x and w must be
+// multiples of 8 or the window is rejected and the whole page repaints.
+void test_diff_x_is_byte_aligned() {
+  Canvas a = freshCanvas();
+  Canvas b = secondCanvas();
+  drawText(b, font, 13, 40, "x");
+  const Rect d = diffCanvas(a, b);
+  TEST_ASSERT_EQUAL_INT(0, d.x % 8);
+  TEST_ASSERT_EQUAL_INT(0, d.w % 8);
+}
+
+// One typed character must not report the whole page as damaged.
+void test_diff_of_a_single_line_stays_small() {
+  Canvas a = freshCanvas();
+  drawText(a, font, 10, 40, "Hallo");
+  Canvas b = secondCanvas();
+  memcpy(b.bits, a.bits, kStride * kH);
+  drawText(b, font, 10, 40, "Hallo!");
+  const Rect d = diffCanvas(a, b);
+  TEST_ASSERT_FALSE(d.empty());
+  TEST_ASSERT_TRUE_MESSAGE(d.h < 40, "one line of change reported as many rows");
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_utf8_decodes_ascii_and_multibyte);
@@ -239,5 +298,9 @@ int main(int, char**) {
   RUN_TEST(test_wrap_handles_umlauts_in_measurement);
   RUN_TEST(test_invert_flips_pixels_and_is_its_own_inverse);
   RUN_TEST(test_invert_off_canvas_is_safe);
+  RUN_TEST(test_diff_of_identical_canvases_is_empty);
+  RUN_TEST(test_diff_encloses_every_changed_pixel);
+  RUN_TEST(test_diff_x_is_byte_aligned);
+  RUN_TEST(test_diff_of_a_single_line_stays_small);
   return UNITY_END();
 }

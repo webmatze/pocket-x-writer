@@ -92,9 +92,18 @@ bool gUsbMode = false;
 // driver's charge SCRUB -- it seeds the old plane as the complement of the
 // target so EVERY pixel makes a transition, clearing that residue. It costs more
 // time, so it is spent where the writer will not feel it.
-constexpr uint8_t kMaxFastBeforeScrub = 10;   // hard cap while typing continuously
-constexpr uint32_t kIdleScrubMs = 2500;       // a pause is the free moment to scrub
+// With damage tracking a keystroke only touches its own line, so residue builds
+// far more slowly than when every update repainted the whole page. The cap can
+// be much higher and the pause much longer, which is what makes the scrub rare.
+constexpr uint8_t kMaxFastBeforeScrub = 40;
+constexpr uint32_t kIdleScrubMs = 6000;
+// Below this fraction of the page, refresh just the changed rectangle. Above it
+// the window costs the same as a full pass, so there is nothing to gain.
+constexpr uint32_t kWindowMaxRows = 200;
 uint8_t gFastSinceScrub = 0;
+// Previous frame, kept to diff against. Trusting a frame comparison rather than
+// hand-reported damage means a missed report cannot leave stale pixels behind.
+uint8_t* gPrevFrame = nullptr;
 uint32_t gLastRefreshAt = 0;
 bool gForceFullRefresh = false;
 
@@ -265,6 +274,7 @@ void openChapter(uint16_t index) {
   // A whole new page of text: without a full flash the previous chapter stays
   // legible underneath it, which is exactly what the ghosting looked like.
   gForceFullRefresh = true;
+  if (gPrevFrame) memset(gPrevFrame, 0, (uint32_t)kRowBytes * kH);   // force a full diff
   gDirty = true;
   if (!gPendingSince) gPendingSince = millis();
 }
@@ -513,6 +523,7 @@ void setup() {
                                }());
   gDoc = &doc;
   gClipboard = (char*)heap_caps_malloc(kClipboardSize, MALLOC_CAP_SPIRAM);
+  gPrevFrame = (uint8_t*)heap_caps_malloc((uint32_t)kRowBytes * kH, MALLOC_CAP_SPIRAM);
   Serial.printf("[doc] %lu KB document + %lu KB undo in PSRAM (%s)\n",
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
@@ -693,31 +704,53 @@ void loop() {
     snprintf(status, sizeof(status), "Kap. %u/%u  %lu Worte  Ziel %u%%  %s",
              gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
              (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
-    redraw(display.getFrameBuffer(), status);
+    uint8_t* fb = display.getFrameBuffer();
+    redraw(fb, status);
 
-    // Scrub when the writer has paused, or when too many partials have piled up
-    // to keep going. A full flash only for a whole-page change.
-    const bool idle = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
-    EInkDisplay::RefreshMode mode = EInkDisplay::FAST_REFRESH;
-    if (gForceFullRefresh) {
-      mode = EInkDisplay::FULL_REFRESH;
-      gForceFullRefresh = false;
-      gFastSinceScrub = 0;
-    } else if (gFastSinceScrub >= kMaxFastBeforeScrub || (idle && gFastSinceScrub > 0)) {
-      mode = EInkDisplay::HALF_REFRESH;
-      gFastSinceScrub = 0;
-    } else {
-      ++gFastSinceScrub;
+    // What actually changed on screen? Comparing frames is cheaper than a panel
+    // refresh by orders of magnitude, and it catches the common case where a
+    // keypress changed nothing visible at all.
+    pocketx::Rect damage{0, 0, kW, kH};
+    if (gPrevFrame) {
+      const pocketx::Canvas now{fb, kW, kH, kRowBytes};
+      const pocketx::Canvas prev{gPrevFrame, kW, kH, kRowBytes};
+      damage = pocketx::diffCanvas(prev, now);
+      if (damage.empty()) {          // nothing to show; do not burn a refresh
+        gDirty = false;
+        gPendingSince = 0;
+        goto refresh_done;
+      }
+      memcpy(gPrevFrame, fb, (uint32_t)kRowBytes * kH);
     }
 
-    // Only FAST overlaps: the scrubbing modes are worth waiting out, and they
-    // run at moments the writer is not mid-word anyway.
-    if (mode == EInkDisplay::FAST_REFRESH) display.displayBufferAsync(mode);
-    else display.displayBuffer(mode);
+    {
+      const bool idle = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
+      if (gForceFullRefresh) {
+        display.displayBuffer(EInkDisplay::FULL_REFRESH);
+        gForceFullRefresh = false;
+        gFastSinceScrub = 0;
+      } else if (gFastSinceScrub >= kMaxFastBeforeScrub || (idle && gFastSinceScrub > 0)) {
+        // The scrub has to cover the whole panel: residue sits wherever earlier
+        // partials landed, not only where the last one did.
+        display.displayBuffer(EInkDisplay::HALF_REFRESH);
+        gFastSinceScrub = 0;
+      } else if ((uint32_t)damage.h <= kWindowMaxRows) {
+        // Confine the partial to the rows that changed. It costs the same time
+        // as a full pass on this panel, but only this band collects residue --
+        // which is what makes the scrub rare enough to stop being a nuisance.
+        display.displayWindow((uint16_t)damage.x, (uint16_t)damage.y, (uint16_t)damage.w,
+                              (uint16_t)damage.h);
+        ++gFastSinceScrub;
+      } else {
+        display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
+        ++gFastSinceScrub;
+      }
+    }
 
     gLastRefreshAt = millis();
     gDirty = false;
     gPendingSince = 0;
+  refresh_done:;
   }
 
   // After a pause, clean the page once even when nothing else changed.

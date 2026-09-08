@@ -57,6 +57,16 @@ void fillRect(const Canvas& canvas, const Rect& r, bool black);
 // first and inverting afterwards avoids needing a white-ink draw path.
 void invertRect(const Canvas& canvas, const Rect& r);
 
+// Bounding box of the pixels that differ between two equally shaped canvases.
+// Empty when they are identical.
+//
+// This is what lets the panel be told to refresh only what changed. Comparing
+// whole frames rather than trusting callers to report their own damage means a
+// missed report cannot leave stale pixels on screen -- the diff is the truth.
+// x is snapped outward to byte boundaries, because the panel's partial-window
+// command addresses columns in bytes.
+Rect diffCanvas(const Canvas& a, const Canvas& b);
+
 }  // namespace pocketx
 
 namespace pocketx {

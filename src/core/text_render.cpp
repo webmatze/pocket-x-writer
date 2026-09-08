@@ -92,6 +92,32 @@ void invertRect(const Canvas& c, const Rect& r) {
   }
 }
 
+Rect diffCanvas(const Canvas& a, const Canvas& b) {
+  Rect d;
+  if (!a.bits || !b.bits || a.width != b.width || a.height != b.height || a.stride != b.stride)
+    return d;
+
+  int32_t y0 = a.height, y1 = -1, x0 = a.stride, x1 = -1;
+  for (uint16_t y = 0; y < a.height; ++y) {
+    const uint8_t* pa = a.bits + (uint32_t)y * a.stride;
+    const uint8_t* pb = b.bits + (uint32_t)y * b.stride;
+    for (uint16_t xb = 0; xb < a.stride; ++xb) {
+      if (pa[xb] == pb[xb]) continue;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      if (xb < x0) x0 = xb;
+      if (xb > x1) x1 = xb;
+    }
+  }
+  if (y1 < 0) return d;   // identical
+
+  d.x = x0 * 8;                       // byte-aligned by construction
+  d.w = (x1 - x0 + 1) * 8;
+  d.y = y0;
+  d.h = y1 - y0 + 1;
+  return d;
+}
+
 Rect drawText(const Canvas& c, const Font& font, int32_t x, int32_t baselineY, const char* utf8) {
   Rect damage;
   if (!utf8 || !c.bits) return damage;
