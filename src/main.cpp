@@ -199,7 +199,7 @@ void redraw(uint8_t* fb, const char* status) {
 
 // Vertical movement is a view operation: it means "same x, one line up/down" in
 // the wrapped layout, which only the layout knows.
-void moveCursorVertically(int dir) {
+void moveCursorVertically(int dir, bool extend) {
   const char* text = gDoc->text();
   static pocketx::Line lines[kMaxLines];
   const uint16_t n = pocketx::wrapText(kFont, text, kTextWidth, lines, kMaxLines);
@@ -211,7 +211,15 @@ void moveCursorVertically(int dir) {
     if (lines[i].begin <= cur) line = i;
 
   const int32_t target = dir < 0 ? (int32_t)line - 1 : (int32_t)line + 1;
-  if (target < 0 || target >= n) return;
+  if (target < 0 || target >= n) {
+    // No line to move to -- but the keypress must still resolve the selection.
+    // Returning early here is why Ctrl+A followed by Down left the whole page
+    // highlighted with no way out: Up happened to work only because it reached
+    // setCursor, which collapses as a side effect.
+    if (!extend && gDoc->hasSelection())
+      gDoc->setCursor(dir > 0 ? gDoc->selectionEnd() : gDoc->selectionBegin());
+    return;
+  }
 
   // Preserve the visual column: walk the target line until the pen passes the
   // cursor's x. Character widths differ, so this is a search, not arithmetic.
@@ -233,7 +241,7 @@ void moveCursorVertically(int dir) {
     i += adv;
     best = i;
   }
-  gDoc->setCursor(best);
+  gDoc->setCursor(best, extend);
 }
 
 bool saveCurrentChapter() {
@@ -624,8 +632,8 @@ void loop() {
           ctrl ? gDoc->moveWordLeft(shift) : gDoc->moveLeft(shift);  changed = true; break;
         case freeink::SpecialKey::Right:
           ctrl ? gDoc->moveWordRight(shift) : gDoc->moveRight(shift); changed = true; break;
-        case freeink::SpecialKey::Up:        moveCursorVertically(-1); changed = true; break;
-        case freeink::SpecialKey::Down:      moveCursorVertically(+1); changed = true; break;
+        case freeink::SpecialKey::Up:        moveCursorVertically(-1, shift); changed = true; break;
+        case freeink::SpecialKey::Down:      moveCursorVertically(+1, shift); changed = true; break;
         case freeink::SpecialKey::Home:      gDoc->moveToLineStart(shift); changed = true; break;
         case freeink::SpecialKey::End:       gDoc->moveToLineEnd(shift);   changed = true; break;
         // Page keys move between chapters -- the navigation a book needs more

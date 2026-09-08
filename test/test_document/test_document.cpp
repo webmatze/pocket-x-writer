@@ -393,6 +393,36 @@ void test_setCursor_clears_the_selection() {
   TEST_ASSERT_FALSE(d.hasSelection());
 }
 
+
+void test_setCursor_can_extend_a_selection() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.setCursor(0);
+  d.setCursor(5, /*extend=*/true);
+  TEST_ASSERT_TRUE(d.hasSelection());
+  TEST_ASSERT_EQUAL_UINT32(0, d.selectionBegin());
+  TEST_ASSERT_EQUAL_UINT32(5, d.selectionEnd());
+  char buf[16];
+  d.copySelection(buf, sizeof(buf));
+  TEST_ASSERT_EQUAL_STRING("Hallo", buf);
+}
+
+// Collapsing to an edge is what an unshifted arrow must do when the cursor
+// cannot travel further -- otherwise Ctrl+A leaves the page stuck highlighted.
+void test_collapsing_a_selection_to_either_edge() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.selectAll();
+  d.setCursor(d.selectionEnd());
+  TEST_ASSERT_FALSE(d.hasSelection());
+  TEST_ASSERT_EQUAL_UINT32(10, d.cursor());
+
+  d.selectAll();
+  d.setCursor(d.selectionBegin());
+  TEST_ASSERT_FALSE(d.hasSelection());
+  TEST_ASSERT_EQUAL_UINT32(0, d.cursor());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_starts_empty);
@@ -432,5 +462,7 @@ int main(int, char**) {
   RUN_TEST(test_copy_without_a_selection_yields_nothing);
   RUN_TEST(test_copy_respects_the_destination_size);
   RUN_TEST(test_setCursor_clears_the_selection);
+  RUN_TEST(test_setCursor_can_extend_a_selection);
+  RUN_TEST(test_collapsing_a_selection_to_either_edge);
   return UNITY_END();
 }

@@ -54,12 +54,17 @@ uint32_t Document::nextBoundary(uint32_t pos) const {
   return i;
 }
 
-void Document::setCursor(uint32_t byteOffset) {
+void Document::setCursor(uint32_t byteOffset, bool extend) {
   if (byteOffset > len_) byteOffset = len_;
   // Snap back onto a character boundary so a cursor can never split an "ä".
   while (byteOffset > 0 && isContinuation(buf_[byteOffset])) --byteOffset;
+  if (extend) {
+    // Anchor at where the cursor was, before it moves.
+    if (!hasAnchor_) { anchor_ = cursor_; hasAnchor_ = true; }
+  } else {
+    hasAnchor_ = false;
+  }
   cursor_ = byteOffset;
-  hasAnchor_ = false;
   breakUndoGroup();
 }
 

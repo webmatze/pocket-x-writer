@@ -53,7 +53,10 @@ class Document {
   // --- cursor --------------------------------------------------------------
   uint32_t cursor() const { return cursor_; }
   // Snaps to the nearest character boundary at or before `byteOffset`.
-  void setCursor(uint32_t byteOffset);
+  // With `extend`, the selection grows from its anchor instead of collapsing --
+  // the same contract as the movement functions, so a view that computes a
+  // target position itself (vertical movement) behaves like the rest.
+  void setCursor(uint32_t byteOffset, bool extend = false);
 
   // Every movement takes `extend`: with it the selection grows from its anchor
   // (Shift+arrow), without it any selection collapses. Keeping it a parameter
