@@ -104,6 +104,14 @@ uint8_t gFastSinceScrub = 0;
 // Previous frame, kept to diff against. Trusting a frame comparison rather than
 // hand-reported damage means a missed report cannot leave stale pixels behind.
 uint8_t* gPrevFrame = nullptr;
+
+// The status line sits at the top of the page. If it changes while the writer is
+// typing at the bottom, the single damage rectangle spans almost the whole page
+// and the cheap windowed refresh is lost. It carries nothing that needs
+// per-keystroke precision, so it is rebuilt only when the writer pauses or the
+// document is saved -- which keeps typing damage confined to one text line.
+char gStatusText[128] = "PocketX Writer";
+bool gStatusStale = true;
 uint32_t gLastRefreshAt = 0;
 bool gForceFullRefresh = false;
 
@@ -260,6 +268,7 @@ bool saveCurrentChapter() {
   gDoc->breakUndoGroup();     // a save is a natural undo boundary
   gLastSaveAt = millis();
   gSaveFailed = false;
+  gStatusStale = true;
   return true;
 }
 
@@ -274,6 +283,7 @@ void openChapter(uint16_t index) {
   // A whole new page of text: without a full flash the previous chapter stays
   // legible underneath it, which is exactly what the ghosting looked like.
   gForceFullRefresh = true;
+  gStatusStale = true;
   if (gPrevFrame) memset(gPrevFrame, 0, (uint32_t)kRowBytes * kH);   // force a full diff
   gDirty = true;
   if (!gPendingSince) gPendingSince = millis();
@@ -694,16 +704,20 @@ void loop() {
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (!gUsbMode && gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
-    char status[128];
-    const char* saveState = gSaveFailed          ? "NICHT GESPEICHERT"
-                            : gDoc->dirty()      ? "*"
-                            : gStorage.mounted() ? "gespeichert"
-                                                 : "keine SD";
-    const uint32_t words = pocketx::countWords(gDoc->text());
-    const uint32_t today = words > gWordsAtOpen ? words - gWordsAtOpen : 0;
-    snprintf(status, sizeof(status), "Kap. %u/%u  %lu Worte  Ziel %u%%  %s",
-             gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
-             (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
+    const bool idleNow = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
+    if (gStatusStale || idleNow) {
+      const char* saveState = gSaveFailed          ? "NICHT GESPEICHERT"
+                              : gDoc->dirty()      ? "*"
+                              : gStorage.mounted() ? "gespeichert"
+                                                   : "keine SD";
+      const uint32_t words = pocketx::countWords(gDoc->text());
+      const uint32_t today = words > gWordsAtOpen ? words - gWordsAtOpen : 0;
+      snprintf(gStatusText, sizeof(gStatusText), "Kap. %u/%u  %lu Worte  Ziel %u%%  %s",
+               gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
+               (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
+      gStatusStale = false;
+    }
+    const char* status = gStatusText;
     uint8_t* fb = display.getFrameBuffer();
     redraw(fb, status);
 
