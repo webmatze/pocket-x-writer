@@ -23,6 +23,7 @@
 #include "storage.h"
 
 #include "core/document.h"
+#include "core/project.h"
 #include "core/text_render.h"
 #include "fonts/NotoSans261bpp.h"
 
@@ -65,8 +66,16 @@ constexpr uint16_t kUndoRecords = 512;
 pocketx::Document* gDoc = nullptr;
 pocketx::Storage gStorage;
 
-// One document for now; projects and chapters arrive with M7.
-constexpr const char* kTitle = "Kapitel 1";
+constexpr const char* kBookTitle = "Mein Buch";
+// A daily word goal, the number a writer actually steers by.
+constexpr uint32_t kDailyGoal = 1000;
+
+pocketx::Chapter gChapters[pocketx::Storage::kMaxChapters];
+uint16_t gChapterCount = 0;
+uint16_t gChapterIndex = 0;
+// Words already written when the chapter was opened, so the goal measures
+// today's output rather than the chapter's total length.
+uint32_t gWordsAtOpen = 0;
 // Idle before an automatic save. Long enough not to save mid-word, short enough
 // that a flat battery costs a sentence rather than a session.
 constexpr uint32_t kAutosaveIdleMs = 8000;
@@ -168,6 +177,37 @@ void moveCursorVertically(int dir) {
     best = i;
   }
   gDoc->setCursor(best);
+}
+
+bool saveCurrentChapter() {
+  if (!gChapterCount) return false;
+  if (!gStorage.saveChapter(*gDoc, gChapters[gChapterIndex])) { gSaveFailed = true; return false; }
+  gDoc->markClean();
+  gDoc->breakUndoGroup();     // a save is a natural undo boundary
+  gLastSaveAt = millis();
+  gSaveFailed = false;
+  return true;
+}
+
+void openChapter(uint16_t index) {
+  if (index >= gChapterCount) return;
+  // Never switch away from unsaved work.
+  if (gDoc->dirty()) saveCurrentChapter();
+  gChapterIndex = index;
+  gStorage.loadChapter(*gDoc, gChapters[index]);
+  gWordsAtOpen = pocketx::countWords(gDoc->text());
+  gScrollLine = 0;
+  gDirty = true;
+  if (!gPendingSince) gPendingSince = millis();
+}
+
+void newChapter() {
+  if (gDoc->dirty()) saveCurrentChapter();
+  pocketx::Chapter c;
+  if (!gStorage.createChapter("", &c)) return;
+  gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
+  for (uint16_t i = 0; i < gChapterCount; ++i)
+    if (gChapters[i].number == c.number) { openChapter(i); return; }
 }
 
 void bootOtherSlot() {
@@ -365,9 +405,21 @@ void setup() {
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
 
-  if (gStorage.begin()) {
-    if (!gStorage.load(doc, kTitle))
-      Serial.printf("[sd] nothing to load yet (%s)\n", gStorage.lastError());
+  if (gStorage.begin() && gStorage.openBook(kBookTitle)) {
+    gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
+    if (gChapterCount == 0) {
+      pocketx::Chapter c;
+      if (gStorage.createChapter("", &c))
+        gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
+    }
+    if (gChapterCount) {
+      // Resume where the writer left off: the last chapter is the one being
+      // worked on far more often than the first.
+      gChapterIndex = gChapterCount - 1;
+      gStorage.loadChapter(doc, gChapters[gChapterIndex]);
+      gWordsAtOpen = pocketx::countWords(doc.text());
+    }
+    Serial.printf("[book] %u chapter(s)\n", gChapterCount);
   }
 
   freeink::applyXteinkDisplayController();
@@ -429,16 +481,11 @@ void loop() {
     // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
     // 0x1D here would bind the key labelled Y.
     // Ctrl+S saves immediately.
-    if (ctrl && ev.keycode == 0x16) {
-      if (gStorage.save(*gDoc, kTitle)) {
-        gDoc->markClean();
-        gDoc->breakUndoGroup();
-        gLastSaveAt = millis();
-        gSaveFailed = false;
-      } else {
-        gSaveFailed = true;
-      }
+    if (ctrl && ev.keycode == 0x16) {          // Ctrl+S
+      saveCurrentChapter();
       changed = true;
+    } else if (ctrl && ev.keycode == 0x11) {   // Ctrl+N: new chapter
+      newChapter();
     } else if (ctrl && ev.keycode == 0x1C) {
       if (gDoc->undo()) changed = true;
       Serial.printf("[edit] undo -> %lu bytes\n", (unsigned long)gDoc->size());
@@ -455,6 +502,14 @@ void loop() {
         case freeink::SpecialKey::Down:      moveCursorVertically(+1); changed = true; break;
         case freeink::SpecialKey::Home:      gDoc->moveToLineStart(); changed = true; break;
         case freeink::SpecialKey::End:       gDoc->moveToLineEnd();   changed = true; break;
+        // Page keys move between chapters -- the navigation a book needs more
+        // than paging within one chapter, which the arrows already cover.
+        case freeink::SpecialKey::PageUp:
+          if (gChapterIndex > 0) openChapter(gChapterIndex - 1);
+          break;
+        case freeink::SpecialKey::PageDown:
+          if (gChapterIndex + 1 < gChapterCount) openChapter(gChapterIndex + 1);
+          break;
         case freeink::SpecialKey::None: {
           pocketx::KeyText txt;
           if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) break;
@@ -477,28 +532,23 @@ void loop() {
   // Saving mid-keystroke would stall input for no benefit.
   if (gDoc->dirty() && gLastEditAt && millis() - gLastEditAt >= kAutosaveIdleMs) {
     gLastEditAt = 0;
-    if (gStorage.save(*gDoc, kTitle)) {
-      gDoc->markClean();
-      gDoc->breakUndoGroup();   // a save is a natural undo boundary
-      gLastSaveAt = millis();
-      gSaveFailed = false;
-    } else {
-      gSaveFailed = true;
-    }
+    saveCurrentChapter();
     gDirty = true;              // refresh so the status line reflects the result
     if (!gPendingSince) gPendingSince = millis();
   }
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
-    char status[96];
-    const char* saveState = gSaveFailed              ? "NICHT GESPEICHERT"
-                            : gDoc->dirty()          ? "ungespeichert"
-                            : gStorage.mounted()     ? "gespeichert"
-                                                     : "keine SD";
-    snprintf(status, sizeof(status), "%s  %lu Zeichen  %s",
-             connected ? ble.connectedName() : "keine Tastatur",
-             (unsigned long)gDoc->size(), saveState);
+    char status[128];
+    const char* saveState = gSaveFailed          ? "NICHT GESPEICHERT"
+                            : gDoc->dirty()      ? "*"
+                            : gStorage.mounted() ? "gespeichert"
+                                                 : "keine SD";
+    const uint32_t words = pocketx::countWords(gDoc->text());
+    const uint32_t today = words > gWordsAtOpen ? words - gWordsAtOpen : 0;
+    snprintf(status, sizeof(status), "Kap. %u/%u  %lu Worte  Ziel %u%%  %s",
+             gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
+             (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
     redraw(display.getFrameBuffer(), status);
     display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
     gDirty = false;
