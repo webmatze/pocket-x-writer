@@ -20,6 +20,8 @@
 #include <XteinkDetect.h>
 
 #include "core/de_keymap.h"
+#include "storage.h"
+
 #include "core/document.h"
 #include "core/text_render.h"
 #include "fonts/NotoSans261bpp.h"
@@ -61,6 +63,16 @@ constexpr uint32_t kUndoArena = 16 * 1024;
 constexpr uint16_t kUndoRecords = 512;
 
 pocketx::Document* gDoc = nullptr;
+pocketx::Storage gStorage;
+
+// One document for now; projects and chapters arrive with M7.
+constexpr const char* kTitle = "Kapitel 1";
+// Idle before an automatic save. Long enough not to save mid-word, short enough
+// that a flat battery costs a sentence rather than a session.
+constexpr uint32_t kAutosaveIdleMs = 8000;
+uint32_t gLastEditAt = 0;
+uint32_t gLastSaveAt = 0;
+bool gSaveFailed = false;
 uint16_t gScrollLine = 0;   // first wrapped line drawn
 
 // Where the cursor sits in the wrapped layout, recomputed on each redraw.
@@ -353,6 +365,11 @@ void setup() {
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
 
+  if (gStorage.begin()) {
+    if (!gStorage.load(doc, kTitle))
+      Serial.printf("[sd] nothing to load yet (%s)\n", gStorage.lastError());
+  }
+
   freeink::applyXteinkDisplayController();
   display.begin();
   redraw(display.getFrameBuffer(), "PocketX Writer  Tastatur suchen...");
@@ -411,7 +428,18 @@ void loop() {
 
     // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
     // 0x1D here would bind the key labelled Y.
-    if (ctrl && ev.keycode == 0x1C) {
+    // Ctrl+S saves immediately.
+    if (ctrl && ev.keycode == 0x16) {
+      if (gStorage.save(*gDoc, kTitle)) {
+        gDoc->markClean();
+        gDoc->breakUndoGroup();
+        gLastSaveAt = millis();
+        gSaveFailed = false;
+      } else {
+        gSaveFailed = true;
+      }
+      changed = true;
+    } else if (ctrl && ev.keycode == 0x1C) {
       if (gDoc->undo()) changed = true;
       Serial.printf("[edit] undo -> %lu bytes\n", (unsigned long)gDoc->size());
     } else {
@@ -440,15 +468,37 @@ void loop() {
 
     if (changed) {
       gDirty = true;
+      gLastEditAt = millis();
       if (!gPendingSince) gPendingSince = millis();
     }
   }
 
+  // Autosave: only when the document actually changed and the writer has paused.
+  // Saving mid-keystroke would stall input for no benefit.
+  if (gDoc->dirty() && gLastEditAt && millis() - gLastEditAt >= kAutosaveIdleMs) {
+    gLastEditAt = 0;
+    if (gStorage.save(*gDoc, kTitle)) {
+      gDoc->markClean();
+      gDoc->breakUndoGroup();   // a save is a natural undo boundary
+      gLastSaveAt = millis();
+      gSaveFailed = false;
+    } else {
+      gSaveFailed = true;
+    }
+    gDirty = true;              // refresh so the status line reflects the result
+    if (!gPendingSince) gPendingSince = millis();
+  }
+
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
-    char status[64];
-    snprintf(status, sizeof(status), "PocketX Writer  %s  %lu Zeichen",
-             connected ? ble.connectedName() : "keine Tastatur", (unsigned long)gDoc->size());
+    char status[96];
+    const char* saveState = gSaveFailed              ? "NICHT GESPEICHERT"
+                            : gDoc->dirty()          ? "ungespeichert"
+                            : gStorage.mounted()     ? "gespeichert"
+                                                     : "keine SD";
+    snprintf(status, sizeof(status), "%s  %lu Zeichen  %s",
+             connected ? ble.connectedName() : "keine Tastatur",
+             (unsigned long)gDoc->size(), saveState);
     redraw(display.getFrameBuffer(), status);
     display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
     gDirty = false;
