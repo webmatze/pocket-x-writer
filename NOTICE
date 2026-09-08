@@ -1,0 +1,10 @@
+PocketX Writer
+Copyright (c) 2026 Mathias Karstaedt
+
+This product includes software from the FreeInk SDK
+(https://github.com/Free-Ink/freeink-sdk), licensed under the MIT License.
+The FreeInk SDK is itself derived from the OpenX4 E-Paper Community SDK.
+
+Design and behaviour references consulted during development (both MIT):
+  - CrossPoint Reader  https://github.com/crosspoint-reader/crosspoint-reader
+  - MicroSlate         https://github.com/Josh-writes/microslate-firmware

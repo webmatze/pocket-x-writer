@@ -1,0 +1,18 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.venv/
+
+# Device backups — never commit (large, device-specific)
+backups/
+*.bin
+
+# macOS
+.DS_Store
+
+# Build artifacts
+build/
+*.o
+*.elf
