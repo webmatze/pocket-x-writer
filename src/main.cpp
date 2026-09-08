@@ -336,6 +336,13 @@ void loop() {
 
   freeink::KeyEvent ev;
   while (ble.popKey(ev)) {
+    // The Keychron K2 HE puts a constant 0x39 (Caps Lock) in byte 2 of every
+    // report, including the all-released one, so the SDK's slot decoder reads it
+    // as a permanently held key and keeps re-emitting it. It is a quirk of this
+    // keyboard's report format, not a real keypress: Caps Lock is demonstrably
+    // NOT engaged, since Shift+h still yields "H" rather than "h". Drop it before
+    // it reaches the editor.
+    if (ev.keycode == 0x39) continue;
     if (ev.special == freeink::SpecialKey::Enter) {
       appendText("\n", 1);
       gDirty = true;
