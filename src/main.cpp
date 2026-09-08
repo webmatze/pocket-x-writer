@@ -41,7 +41,7 @@ uint16_t gTyped = 0;
 uint32_t gPendingSince = 0;
 bool gDirty = false;
 bool gScanRequested = false;
-uint32_t gScanStartedAt = 0;
+uint32_t gConnectStartedAt = 0;
 
 char gLine[512];
 uint16_t gLineLen = 0;
@@ -101,30 +101,99 @@ void pollSwitchButton() {
   else if (now - downSince >= kHoldMs) { downSince = 0; bootOtherSlot(); }
 }
 
-void handleScanResults() {
+void listDevices() {
   auto& ble = freeink::BleKeyboardHost::getInstance();
-  if (ble.isScanning() || !gScanRequested) return;
-  gScanRequested = false;
-
   const uint8_t n = ble.deviceCount();
-  Serial.printf("[ble] scan finished, %u device(s)\n", n);
-  int best = -1;
+  Serial.printf("[ble] %u device(s) seen:\n", n);
   for (uint8_t i = 0; i < n; ++i) {
     const auto& d = ble.device(i);
-    Serial.printf("  %2u %-24s %-18s rssi=%4d hid=%d connectable=%d\n",
-                  i, d.name, d.addr, d.rssi, d.hid ? 1 : 0, d.connectable ? 1 : 0);
-    // Prefer the strongest connectable HID advertiser.
-    if (d.hid && d.connectable && (best < 0 || d.rssi > ble.device(best).rssi)) best = i;
+    Serial.printf("  %2u %-24s %-18s rssi=%4d %s%s\n", i, d.name, d.addr, d.rssi,
+                  d.hid ? "HID " : "    ", d.connectable ? "" : "(not connectable)");
   }
-  if (best < 0) {
-    Serial.println("[ble] no connectable HID device found — rescanning");
-    ble.startScan(8000);
-    gScanRequested = true;
-    gScanStartedAt = millis();
-    return;
+  Serial.println("[ble] connect with:  c<index>   e.g. c0");
+}
+
+void handleScanResults() {
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  if (!gScanRequested || ble.isScanning()) return;
+  gScanRequested = false;
+  Serial.println("[ble] scan finished");
+  listDevices();
+}
+
+// Deliberately NOT automatic. An earlier revision connected to the strongest
+// HID advertiser in range and reached for a neighbour's TV remote: "the only
+// HID device nearby" is not the same as "the user's keyboard". Pairing is a
+// decision, so a human makes it.
+void pollSerialCommands() {
+  static char line[16];
+  static uint8_t len = 0;
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c != '\n' && c != '\r') {
+      if (len < sizeof(line) - 1) line[len++] = c;
+      continue;
+    }
+    line[len] = 0;
+    const uint8_t n = len;
+    len = 0;
+    if (n == 0) continue;
+
+    switch (line[0]) {
+      case 's':
+        Serial.println("[ble] scanning 8s...");
+        ble.startScan(8000);
+        gScanRequested = true;
+        break;
+      case 'l':
+        listDevices();
+        break;
+      case 'c': {
+        const int idx = atoi(line + 1);
+        if (idx < 0 || idx >= ble.deviceCount()) { Serial.println("[ble] bad index"); break; }
+        const auto& d = ble.device((uint8_t)idx);
+        Serial.printf("[ble] connecting to %s (%s)\n", d.name, d.addr);
+        gConnectStartedAt = millis();
+        ble.connect(d.addr);
+        break;
+      }
+      case 'p':
+        Serial.printf("[ble] %u bonded:\n", ble.pairedCount());
+        for (uint8_t i = 0; i < ble.pairedCount(); ++i)
+          Serial.printf("  %s (%s)\n", ble.paired(i).name, ble.paired(i).addr);
+        break;
+      case 'f':
+        while (ble.pairedCount()) {
+          Serial.printf("[ble] forgetting %s\n", ble.paired(0).addr);
+          ble.forget(ble.paired(0).addr);
+        }
+        break;
+      case 'd':
+        ble.disconnect();
+        Serial.println("[ble] disconnected");
+        break;
+      default:
+        Serial.println("[ble] s=scan  l=list  c<n>=connect  p=pairings  f=forget all  d=disconnect");
+    }
   }
-  Serial.printf("[ble] connecting to %s (%s)\n", ble.device(best).name, ble.device(best).addr);
-  ble.connect(ble.device(best).addr);
+}
+
+// A connect attempt that never completes would otherwise wedge the UI silently.
+void pollConnectTimeout() {
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  char why[48];
+  if (ble.takeConnectFailure(why, sizeof(why)))
+    Serial.printf("[ble] connect failed: %s\n", why);
+
+  if (!gConnectStartedAt) return;
+  if (ble.isConnected() || !ble.isConnecting()) { gConnectStartedAt = 0; return; }
+  if (millis() - gConnectStartedAt > 15000) {
+    gConnectStartedAt = 0;
+    ble.disconnect();
+    Serial.println("[ble] connect timed out after 15s — aborted");
+  }
 }
 
 }  // namespace
@@ -152,9 +221,9 @@ void setup() {
 
   if (ble.pairedCount() == 0) {
     Serial.println("[ble] scanning 8s — put your keyboard in pairing mode");
+    Serial.println("[ble] commands: s=scan  l=list  c<n>=connect  p=pairings  f=forget all");
     ble.startScan(8000);
     gScanRequested = true;
-    gScanStartedAt = millis();
   } else {
     Serial.println("[ble] waiting for auto-reconnect to a bonded keyboard");
   }
@@ -165,6 +234,8 @@ void loop() {
   ble.poll();
   pollSwitchButton();
   handleScanResults();
+  pollSerialCommands();
+  pollConnectTimeout();
 
   static bool wasConnected = false;
   const bool connected = ble.isConnected();
