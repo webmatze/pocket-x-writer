@@ -13,6 +13,8 @@
 
 #include <Arduino.h>
 #include <esp_ota_ops.h>
+#include <soc/rtc_cntl_reg.h>
+#include <soc/usb_serial_jtag_reg.h>
 
 #include <BleKeyboardHost.h>
 #include <BoardConfig.h>
@@ -435,6 +437,30 @@ void enterUsbTransfer() {
 
 // The card cannot be safely shared, so the way back is a reboot: it remounts the
 // filesystem cleanly and reloads the chapter, including anything the Mac wrote.
+// Point the USB pads back at the built-in CDC/JTAG controller.
+//
+// USB.begin(), which UsbMassStorage needs, switches the pads to the USB-OTG PHY
+// by setting bits in RTC_CNTL_USB_CONF_REG. Those bits live in the RTC domain
+// and SURVIVE esp_restart(), so rebooting out of transfer mode left the pads
+// pointing at a controller nobody was driving. The device then vanished from USB
+// completely -- no serial console, no way to flash it -- and only a true
+// power-on reset brought it back.
+//
+// This went unnoticed until the power latch was fixed: before that, unplugging
+// the cable killed the device outright, and the resulting power-on reset cleared
+// the bits by accident.
+//
+// The sequence is the one the Arduino core itself uses before restarting into
+// the bootloader (usb_switch_to_cdc_jtag(), which is static and so not callable
+// from here). Clearing bits that are already clear is a no-op, so this is also
+// run first thing in setup(): a device stuck in that state heals on its next
+// boot, whatever caused the reboot.
+void routeUsbToCdcJtag() {
+  CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG,
+                      RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
+  CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PHY_SEL);
+}
+
 void pollUsbTransfer() {
   if (!gUsbMode) return;
   const auto st = gMsc.state();
@@ -444,6 +470,7 @@ void pollUsbTransfer() {
     gMsc.end();
     Serial.flush();
     delay(200);
+    routeUsbToCdcJtag();          // or the serial console never comes back
     esp_restart();
   }
 }
@@ -708,6 +735,9 @@ void setup() {
   // missing latch -- VBUS feeds the rail anyway -- so on the cable everything
   // looks fine and the device dies the moment it is unplugged.
   BoardConfig::holdPowerRails();
+  // Before Serial.begin(): undo a USB-OTG pad routing left over from a previous
+  // transfer mode, which no reset short of a power cycle clears by itself.
+  routeUsbToCdcJtag();
 
   Serial.begin(115200);
   delay(2000);
