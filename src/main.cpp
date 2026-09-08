@@ -20,6 +20,7 @@
 #include <XteinkDetect.h>
 
 #include "core/de_keymap.h"
+#include "core/document.h"
 #include "core/text_render.h"
 #include "fonts/NotoSans261bpp.h"
 
@@ -53,64 +54,108 @@ bool gHunting = false;
 uint32_t gHuntUntil = 0;
 uint8_t gReported = 0;
 
-// The document. A flat UTF-8 buffer is enough to prove the pipeline; the real
-// editor core (gap buffer, undo, cursor) is the next step.
-char gText[8192];
-uint32_t gTextLen = 0;
+// The document lives in PSRAM -- 8 MB of it is exactly what makes this device
+// suited to writing, and a chapter never comes close to the limit.
+constexpr uint32_t kDocCapacity = 256 * 1024;
+constexpr uint32_t kUndoArena = 16 * 1024;
+constexpr uint16_t kUndoRecords = 512;
 
-void appendText(const char* s, uint8_t len) {
-  for (uint8_t i = 0; i < len && gTextLen < sizeof(gText) - 1; ++i) gText[gTextLen++] = s[i];
-  gText[gTextLen] = 0;
-}
+pocketx::Document* gDoc = nullptr;
+uint16_t gScrollLine = 0;   // first wrapped line drawn
 
-// Delete one CHARACTER, not one byte: chopping a byte off "ä" would leave a
-// broken UTF-8 sequence in the document.
-void backspaceChar() {
-  if (!gTextLen) return;
-  uint32_t i = gTextLen - 1;
-  while (i > 0 && (gText[i] & 0xC0) == 0x80) --i;   // step back over continuation bytes
-  gTextLen = i;
-  gText[gTextLen] = 0;
-}
+// Where the cursor sits in the wrapped layout, recomputed on each redraw.
+uint16_t gCursorLine = 0;
+int32_t gCursorX = 0;
 
-void redraw(uint8_t* fb, bool connected, const char* status) {
+// Lay out the document, work out where the cursor is, scroll so it stays
+// visible, and draw. Returns nothing: the caller decides how to push the frame.
+void redraw(uint8_t* fb, const char* status) {
   const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
   memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
 
-  // Status strip.
   pocketx::drawText(canvas, kFont, kMargin, 34, status);
   pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
 
-  pocketx::Line lines[kMaxLines];
-  const uint16_t n = pocketx::wrapText(kFont, gText, kTextWidth, lines, kMaxLines);
+  const char* text = gDoc->text();
+  static pocketx::Line lines[kMaxLines];
+  uint16_t n = pocketx::wrapText(kFont, text, kTextWidth, lines, kMaxLines);
+  if (!n) { lines[0] = pocketx::Line{0, 0}; n = 1; }
 
-  // Show the tail of the document: a writer wants to see what they just typed.
+  // Locate the cursor in the wrapped layout. The cursor belongs to the last
+  // line whose start is at or before it, so a cursor sitting exactly on a line
+  // break lands at the start of the new line rather than trailing the old one.
+  const uint32_t cur = gDoc->cursor();
+  gCursorLine = 0;
+  for (uint16_t i = 0; i < n; ++i)
+    if (lines[i].begin <= cur) gCursorLine = i;
+
+  char buf[512];
+  {
+    uint32_t len = cur - lines[gCursorLine].begin;
+    if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
+    memcpy(buf, text + lines[gCursorLine].begin, len);
+    buf[len] = 0;
+    gCursorX = kMargin + (int32_t)pocketx::measureText(kFont, buf);
+  }
+
   const uint16_t fits = (kH - kTextTop) / kFont.yAdvance;
-  const uint16_t firstLine = n > fits ? n - fits : 0;
+  // Keep the cursor on screen without jumping the page around more than needed.
+  if (gCursorLine < gScrollLine) gScrollLine = gCursorLine;
+  if (gCursorLine >= gScrollLine + fits) gScrollLine = gCursorLine - fits + 1;
+  if (gScrollLine > n) gScrollLine = n ? n - 1 : 0;
 
   int32_t y = kTextTop + kFont.ascent;
-  char buf[256];
-  for (uint16_t i = firstLine; i < n; ++i) {
+  for (uint16_t i = gScrollLine; i < n && i < gScrollLine + fits; ++i) {
     uint32_t len = lines[i].end - lines[i].begin;
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-    memcpy(buf, gText + lines[i].begin, len);
+    memcpy(buf, text + lines[i].begin, len);
     buf[len] = 0;
     pocketx::drawText(canvas, kFont, kMargin, y, buf);
     y += kFont.yAdvance;
   }
 
-  // Caret: a filled block after the last line, so the page looks alive even
-  // between refreshes.
-  if (n) {
-    uint32_t len = lines[n - 1].end - lines[n - 1].begin;
-    if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-    memcpy(buf, gText + lines[n - 1].begin, len);
-    buf[len] = 0;
-    const int32_t caretX = kMargin + (int32_t)pocketx::measureText(kFont, buf);
-    const int32_t caretY = kTextTop + (int32_t)(n - 1 - firstLine) * kFont.yAdvance;
-    pocketx::fillRect(canvas, pocketx::Rect{caretX + 2, caretY + 4, 2, kFont.ascent}, true);
+  // Caret, drawn where the cursor actually is rather than always at the end.
+  const int32_t caretY = kTextTop + (int32_t)(gCursorLine - gScrollLine) * kFont.yAdvance;
+  pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 4, 2, kFont.ascent}, true);
+}
+
+// Vertical movement is a view operation: it means "same x, one line up/down" in
+// the wrapped layout, which only the layout knows.
+void moveCursorVertically(int dir) {
+  const char* text = gDoc->text();
+  static pocketx::Line lines[kMaxLines];
+  const uint16_t n = pocketx::wrapText(kFont, text, kTextWidth, lines, kMaxLines);
+  if (!n) return;
+
+  const uint32_t cur = gDoc->cursor();
+  uint16_t line = 0;
+  for (uint16_t i = 0; i < n; ++i)
+    if (lines[i].begin <= cur) line = i;
+
+  const int32_t target = dir < 0 ? (int32_t)line - 1 : (int32_t)line + 1;
+  if (target < 0 || target >= n) return;
+
+  // Preserve the visual column: walk the target line until the pen passes the
+  // cursor's x. Character widths differ, so this is a search, not arithmetic.
+  char buf[512];
+  uint32_t len = lines[gCursorLine].end - lines[gCursorLine].begin;
+  if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
+  memcpy(buf, text + lines[gCursorLine].begin, cur - lines[gCursorLine].begin);
+  buf[cur - lines[gCursorLine].begin] = 0;
+  const uint32_t wantX = pocketx::measureText(kFont, buf);
+
+  const pocketx::Line& tl = lines[target];
+  uint32_t best = tl.begin, x = 0;
+  for (uint32_t i = tl.begin; i < tl.end;) {
+    uint32_t cp = 0;
+    const uint8_t adv = pocketx::utf8Next(text + i, &cp);
+    const uint32_t w = pocketx::glyphAdvance(kFont, cp);
+    if (x + w / 2 > wantX) break;
+    x += w;
+    i += adv;
+    best = i;
   }
-  (void)connected;
+  gDoc->setCursor(best);
 }
 
 void bootOtherSlot() {
@@ -289,9 +334,28 @@ void setup() {
   esp_ota_mark_app_valid_cancel_rollback();
   pinMode(kSwitchButton, INPUT_PULLUP);
 
+  // Document storage in PSRAM: 8 MB is the reason this device suits writing.
+  char* docBuf = (char*)heap_caps_malloc(kDocCapacity, MALLOC_CAP_SPIRAM);
+  char* undoArena = (char*)heap_caps_malloc(kUndoArena, MALLOC_CAP_SPIRAM);
+  auto* undoRecs = (pocketx::Document::Record*)heap_caps_malloc(
+      sizeof(pocketx::Document::Record) * kUndoRecords, MALLOC_CAP_SPIRAM);
+  static pocketx::Document doc(docBuf, docBuf ? kDocCapacity : 0,
+                               [&] {
+                                 pocketx::Document::UndoConfig u;
+                                 u.arena = undoArena;
+                                 u.arenaSize = undoArena ? kUndoArena : 0;
+                                 u.records = undoRecs;
+                                 u.maxRecords = undoRecs ? kUndoRecords : 0;
+                                 return u;
+                               }());
+  gDoc = &doc;
+  Serial.printf("[doc] %lu KB document + %lu KB undo in PSRAM (%s)\n",
+                (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
+                docBuf ? "ok" : "ALLOCATION FAILED");
+
   freeink::applyXteinkDisplayController();
   display.begin();
-  redraw(display.getFrameBuffer(), false, "PocketX Writer  Tastatur suchen...");
+  redraw(display.getFrameBuffer(), "PocketX Writer  Tastatur suchen...");
   display.displayBuffer(EInkDisplay::FULL_REFRESH);
 
   Serial.println("\n=== PocketX Writer :: M4 BLE keyboard ===");
@@ -337,53 +401,55 @@ void loop() {
   freeink::KeyEvent ev;
   while (ble.popKey(ev)) {
     // The Keychron K2 HE puts a constant 0x39 (Caps Lock) in byte 2 of every
-    // report, including the all-released one, so the SDK's slot decoder reads it
-    // as a permanently held key and keeps re-emitting it. It is a quirk of this
-    // keyboard's report format, not a real keypress: Caps Lock is demonstrably
-    // NOT engaged, since Shift+h still yields "H" rather than "h". Drop it before
-    // it reaches the editor.
+    // report, so the slot decoder reads it as a permanently held key. It is a
+    // quirk of this keyboard's report format, not a real keypress: Caps Lock is
+    // demonstrably NOT engaged, since Shift+h still yields "H" rather than "h".
     if (ev.keycode == 0x39) continue;
-    if (ev.special == freeink::SpecialKey::Enter) {
-      appendText("\n", 1);
-      gDirty = true;
-      if (!gPendingSince) gPendingSince = millis();
-      continue;
-    }
-    if (ev.special == freeink::SpecialKey::Backspace) {
-      backspaceChar();
-      gDirty = true;
-      if (!gPendingSince) gPendingSince = millis();
-      continue;
-    }
-    if (ev.special != freeink::SpecialKey::None) {
-      // Navigation keys are recognised but not yet acted on -- cursor movement
-      // arrives with the editor core.
-      Serial.printf("[key] special=%u\n", (unsigned)ev.special);
-      continue;
+
+    bool changed = false;
+    const bool ctrl = ev.mods & (pocketx::kModLCtrl | pocketx::kModRCtrl);
+
+    // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
+    // 0x1D here would bind the key labelled Y.
+    if (ctrl && ev.keycode == 0x1C) {
+      if (gDoc->undo()) changed = true;
+      Serial.printf("[edit] undo -> %lu bytes\n", (unsigned long)gDoc->size());
+    } else {
+      switch (ev.special) {
+        case freeink::SpecialKey::Enter:     changed = gDoc->insert("\n", 1); break;
+        case freeink::SpecialKey::Backspace: changed = gDoc->backspace(); break;
+        case freeink::SpecialKey::Delete:    changed = gDoc->deleteForward(); break;
+        case freeink::SpecialKey::Left:
+          ctrl ? gDoc->moveWordLeft() : gDoc->moveLeft();  changed = true; break;
+        case freeink::SpecialKey::Right:
+          ctrl ? gDoc->moveWordRight() : gDoc->moveRight(); changed = true; break;
+        case freeink::SpecialKey::Up:        moveCursorVertically(-1); changed = true; break;
+        case freeink::SpecialKey::Down:      moveCursorVertically(+1); changed = true; break;
+        case freeink::SpecialKey::Home:      gDoc->moveToLineStart(); changed = true; break;
+        case freeink::SpecialKey::End:       gDoc->moveToLineEnd();   changed = true; break;
+        case freeink::SpecialKey::None: {
+          pocketx::KeyText txt;
+          if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) break;
+          if (txt.consumedAsDead) break;          // dead key armed, nothing to insert yet
+          changed = gDoc->insert(txt.utf8, txt.len);
+          break;
+        }
+        default: break;
+      }
     }
 
-    pocketx::KeyText txt;
-    if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) {
-      Serial.printf("[key] ignored usage=0x%02X mods=0x%02X\n", ev.keycode, ev.mods);
-      continue;
+    if (changed) {
+      gDirty = true;
+      if (!gPendingSince) gPendingSince = millis();
     }
-    if (txt.consumedAsDead) { Serial.println("[key] dead key armed"); continue; }
-
-    appendText(txt.utf8, txt.len);
-    gDirty = true;
-    if (!gPendingSince) gPendingSince = millis();
-    // Show what the SDK's US table would have produced, so a layout regression
-    // is visible rather than silent.
-    Serial.printf("[key] 0x%02X/%02X -> \"%s\" (us:'%c')  doc=%lub\n", ev.keycode, ev.mods, txt.utf8,
-                  ev.ch ? ev.ch : ' ', (unsigned long)gTextLen);
   }
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
     char status[64];
     snprintf(status, sizeof(status), "PocketX Writer  %s  %lu Zeichen",
-             connected ? ble.connectedName() : "keine Tastatur", (unsigned long)gTextLen);
-    redraw(display.getFrameBuffer(), connected, status);
+             connected ? ble.connectedName() : "keine Tastatur", (unsigned long)gDoc->size());
+    redraw(display.getFrameBuffer(), status);
     display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
     gDirty = false;
     gPendingSince = 0;
