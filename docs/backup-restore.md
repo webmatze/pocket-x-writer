@@ -83,3 +83,88 @@ Read from this device's own backup:
 open in the plan: the layout already supports a reader in one slot and PocketX
 Writer in the other, and our firmware currently uses 497 KB — roughly 6% of one
 slot. No partition changes needed.
+
+---
+
+# Dual boot: what is in the two app slots
+
+This device shipped to us with **both** firmwares already present. Read from its
+own backup and each verified against the live device with `esptool verify-flash`:
+
+| slot | offset | contents | build |
+|---|---|---|---|
+| `app0` | `0x10000` | **CrossPoint** (currently boots) | ESP-IDF 5.5.2, Feb 11 2026, 5,957,264 B |
+| `app1` | `0x7f0000` | **Original Xteink firmware `xteink_app` 7.4.4** | ESP-IDF 6.0.1, Aug 27 2026, 5,586,672 B |
+
+The CrossPoint installer did not delete the stock firmware — it moved it to the
+second OTA slot. Nothing was lost.
+
+> `app0`'s ESP app descriptor reports `project = arduino-lib-builder`; that is the
+> generic project name every Arduino-framework build carries, not a different
+> firmware. The binary contains "CrossPoint" 32 times.
+
+## Extracting the individual apps
+
+```bash
+./.venv/bin/python scripts/extract-apps.py backups/<name>
+```
+
+Carves each slot at its exact ESP image length (walked from the image header —
+segment table, checksum padding, appended SHA-256), not by trimming `0xFF`
+padding. Results land in `backups/<name>/apps/` with `apps.json` and
+`SHA256SUMS`, each independently flashable:
+
+```bash
+# put the original Xteink firmware back into its slot
+./.venv/bin/esptool --port /dev/cu.usbmodem2101 write-flash \
+  --flash-mode keep --flash-freq keep --flash-size keep \
+  0x7f0000 backups/<name>/apps/app1-xteink_app-7.4.4.bin
+```
+
+## Choosing which slot boots
+
+```bash
+./scripts/select-slot.py --status     # read-only
+./scripts/select-slot.py --slot 1     # boot the other firmware
+```
+
+The bootloader reads two 32-byte `ota_select` entries — one per 4 KB page of the
+`otadata` partition — takes the highest valid sequence number, and boots slot
+`(seq - 1) % 2`. Switching means writing a higher sequence into the other entry.
+
+The entry CRC is `crc32(seq_bytes, init=0xFFFFFFFF)`. That was **derived
+empirically and checked against both entries this device shipped with** rather
+than assumed, because a wrong CRC invalidates the entry and changes which
+firmware boots.
+
+The tool refuses to select a slot whose first byte is not `0xE9` (no valid ESP
+image), and reads the otadata back afterwards to confirm the switch took effect.
+
+## If a flash goes wrong
+
+The ESP32-S3's download mode lives in ROM, so USB stays reachable even when the
+application bootloops — hold **BOOT**, tap **RESET**. From there
+`restore-device.sh` puts the whole 16 MB back.
+
+## Do not let PlatformIO write the partition table
+
+`pio run -t upload` flashes bootloader **+ partition table +** app. The default
+PlatformIO table gives a 6.25 MB app slot; this device uses **7.9 MB** slots.
+Uploading with the default table would rewrite the partition table and **destroy
+whatever is in `app1`** — including the original firmware.
+
+Before the first hardware upload, the project needs a `partitions.csv` that
+matches this device exactly:
+
+```csv
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x5000
+otadata,  data, ota,     0xe000,   0x2000
+app0,     app,  ota_0,   0x10000,  0x7e0000
+app1,     app,  ota_1,   0x7f0000, 0x7e0000
+spiffs,   data, spiffs,  0xfd0000, 0x14000
+coredump, data, coredump,0xfe4000, 0x1c000
+```
+
+Safer still, and what we do: flash **only** the application binary to its slot
+offset, leaving bootloader and partition table untouched.
