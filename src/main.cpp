@@ -605,6 +605,13 @@ void pollConnectTimeout() {
 }  // namespace
 
 void setup() {
+  // FIRST, before anything touches a peripheral: close the power latch.
+  // On the X4 Pro power.latch0 is GPIO1, the master peripheral-rail enable that
+  // the OEM board-init drives HIGH ahead of all display/SD bring-up. USB hides a
+  // missing latch -- VBUS feeds the rail anyway -- so on the cable everything
+  // looks fine and the device dies the moment it is unplugged.
+  BoardConfig::holdPowerRails();
+
   Serial.begin(115200);
   delay(2000);
   esp_ota_mark_app_valid_cancel_rollback();
