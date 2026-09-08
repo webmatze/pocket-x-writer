@@ -97,6 +97,12 @@ constexpr uint32_t kIdleScrubMs = 2500;       // a pause is the free moment to s
 uint8_t gFastSinceScrub = 0;
 uint32_t gLastRefreshAt = 0;
 bool gForceFullRefresh = false;
+
+// Clipboard in PSRAM. Sized to hold a long passage, not just a word -- moving a
+// paragraph between chapters is the operation this is really for.
+constexpr uint32_t kClipboardSize = 16 * 1024;
+char* gClipboard = nullptr;
+uint32_t gClipboardLen = 0;
 // Idle before an automatic save. Long enough not to save mid-word, short enough
 // that a flat battery costs a sentence rather than a session.
 constexpr uint32_t kAutosaveIdleMs = 8000;
@@ -146,6 +152,10 @@ void redraw(uint8_t* fb, const char* status) {
   if (gCursorLine >= gScrollLine + fits) gScrollLine = gCursorLine - fits + 1;
   if (gScrollLine > n) gScrollLine = n ? n - 1 : 0;
 
+  const uint32_t selFrom = gDoc->selectionBegin();
+  const uint32_t selTo = gDoc->selectionEnd();
+  const bool hasSel = gDoc->hasSelection();
+
   int32_t y = kTextTop + kFont.ascent;
   for (uint16_t i = gScrollLine; i < n && i < gScrollLine + fits; ++i) {
     uint32_t len = lines[i].end - lines[i].begin;
@@ -153,15 +163,38 @@ void redraw(uint8_t* fb, const char* status) {
     memcpy(buf, text + lines[i].begin, len);
     buf[len] = 0;
     pocketx::drawText(canvas, kFont, kMargin, y, buf);
+
+    // Invert the part of this line that falls inside the selection. Drawing the
+    // text first and flipping afterwards avoids a white-ink draw path, and on a
+    // 1-bit panel white-on-black is unmistakable even against ghost residue.
+    if (hasSel && selTo > lines[i].begin && selFrom < lines[i].end) {
+      const uint32_t a = selFrom > lines[i].begin ? selFrom : lines[i].begin;
+      const uint32_t b = selTo < lines[i].end ? selTo : lines[i].end;
+      char head[512];
+      uint32_t hn = a - lines[i].begin;
+      if (hn > sizeof(head) - 1) hn = sizeof(head) - 1;
+      memcpy(head, text + lines[i].begin, hn); head[hn] = 0;
+      const int32_t x0 = kMargin + (int32_t)pocketx::measureText(kFont, head);
+      uint32_t mn = b - a;
+      if (mn > sizeof(head) - 1) mn = sizeof(head) - 1;
+      memcpy(head, text + a, mn); head[mn] = 0;
+      int32_t w = (int32_t)pocketx::measureText(kFont, head);
+      // A selected newline shows as a thin bar, so an empty line still reads
+      // as part of the selection rather than vanishing from it.
+      if (w == 0) w = 6;
+      pocketx::invertRect(canvas, pocketx::Rect{x0, y - kFont.ascent, w, kFont.yAdvance - 2});
+    }
     y += kFont.yAdvance;
   }
 
   // Caret. A 2 px hairline was hard to find on this panel, and ghosting left
   // several of them visible at once. A solid block with a baseline foot reads as
   // one unmistakable mark even against residue.
-  const int32_t caretY = kTextTop + (int32_t)(gCursorLine - gScrollLine) * kFont.yAdvance;
-  pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 3, 5, kFont.ascent - 1}, true);
-  pocketx::fillRect(canvas, pocketx::Rect{gCursorX - 2, caretY + kFont.ascent + 2, 11, 3}, true);
+  if (!hasSel) {
+    const int32_t caretY = kTextTop + (int32_t)(gCursorLine - gScrollLine) * kFont.yAdvance;
+    pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 3, 5, kFont.ascent - 1}, true);
+    pocketx::fillRect(canvas, pocketx::Rect{gCursorX - 2, caretY + kFont.ascent + 2, 11, 3}, true);
+  }
 }
 
 // Vertical movement is a view operation: it means "same x, one line up/down" in
@@ -471,6 +504,7 @@ void setup() {
                                  return u;
                                }());
   gDoc = &doc;
+  gClipboard = (char*)heap_caps_malloc(kClipboardSize, MALLOC_CAP_SPIRAM);
   Serial.printf("[doc] %lu KB document + %lu KB undo in PSRAM (%s)\n",
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
@@ -548,6 +582,7 @@ void loop() {
 
     bool changed = false;
     const bool ctrl = ev.mods & (pocketx::kModLCtrl | pocketx::kModRCtrl);
+    const bool shift = ev.mods & (pocketx::kModLShift | pocketx::kModRShift);
 
     // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
     // 0x1D here would bind the key labelled Y.
@@ -560,6 +595,18 @@ void loop() {
     }
     if (ctrl && ev.keycode == 0x16) {          // Ctrl+S
       saveCurrentChapter();
+      changed = true;
+    } else if (ctrl && ev.keycode == 0x06) {   // Ctrl+C: copy
+      gClipboardLen = gDoc->copySelection(gClipboard, kClipboardSize);
+      Serial.printf("[edit] copied %lu bytes\n", (unsigned long)gClipboardLen);
+    } else if (ctrl && ev.keycode == 0x1B) {   // Ctrl+X: cut
+      gClipboardLen = gDoc->copySelection(gClipboard, kClipboardSize);
+      if (gClipboardLen) changed = gDoc->deleteSelection();
+      Serial.printf("[edit] cut %lu bytes\n", (unsigned long)gClipboardLen);
+    } else if (ctrl && ev.keycode == 0x19) {   // Ctrl+V: paste
+      if (gClipboardLen) changed = gDoc->insert(gClipboard, gClipboardLen);
+    } else if (ctrl && ev.keycode == 0x04) {   // Ctrl+A: select all
+      gDoc->selectAll();
       changed = true;
     } else if (ctrl && ev.keycode == 0x11) {   // Ctrl+N: new chapter
       newChapter();
@@ -574,13 +621,13 @@ void loop() {
           break;
         case freeink::SpecialKey::Delete:    changed = gDoc->deleteForward(); break;
         case freeink::SpecialKey::Left:
-          ctrl ? gDoc->moveWordLeft() : gDoc->moveLeft();  changed = true; break;
+          ctrl ? gDoc->moveWordLeft(shift) : gDoc->moveLeft(shift);  changed = true; break;
         case freeink::SpecialKey::Right:
-          ctrl ? gDoc->moveWordRight() : gDoc->moveRight(); changed = true; break;
+          ctrl ? gDoc->moveWordRight(shift) : gDoc->moveRight(shift); changed = true; break;
         case freeink::SpecialKey::Up:        moveCursorVertically(-1); changed = true; break;
         case freeink::SpecialKey::Down:      moveCursorVertically(+1); changed = true; break;
-        case freeink::SpecialKey::Home:      gDoc->moveToLineStart(); changed = true; break;
-        case freeink::SpecialKey::End:       gDoc->moveToLineEnd();   changed = true; break;
+        case freeink::SpecialKey::Home:      gDoc->moveToLineStart(shift); changed = true; break;
+        case freeink::SpecialKey::End:       gDoc->moveToLineEnd(shift);   changed = true; break;
         // Page keys move between chapters -- the navigation a book needs more
         // than paging within one chapter, which the arrows already cover.
         case freeink::SpecialKey::PageUp:

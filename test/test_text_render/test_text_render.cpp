@@ -199,6 +199,25 @@ void test_wrap_handles_umlauts_in_measurement() {
   TEST_ASSERT_EQUAL_STRING(s, lineText(s, lines[0]));
 }
 
+
+void test_invert_flips_pixels_and_is_its_own_inverse() {
+  Canvas c = freshCanvas();
+  drawText(c, font, 4, 40, "Hallo");
+  const int before = countBlack(c);
+  const Rect r{0, 0, 100, 50};
+  invertRect(c, r);
+  TEST_ASSERT_NOT_EQUAL(before, countBlack(c));
+  invertRect(c, r);
+  TEST_ASSERT_EQUAL_INT(before, countBlack(c));
+}
+
+void test_invert_off_canvas_is_safe() {
+  Canvas c = freshCanvas();
+  invertRect(c, Rect{-20, -20, 40, 40});
+  invertRect(c, Rect{(int32_t)kW - 4, (int32_t)kH - 4, 40, 40});
+  TEST_ASSERT_TRUE(true);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_utf8_decodes_ascii_and_multibyte);
@@ -218,5 +237,7 @@ int main(int, char**) {
   RUN_TEST(test_wrap_breaks_inside_an_overlong_word);
   RUN_TEST(test_wrap_never_exceeds_the_width);
   RUN_TEST(test_wrap_handles_umlauts_in_measurement);
+  RUN_TEST(test_invert_flips_pixels_and_is_its_own_inverse);
+  RUN_TEST(test_invert_off_canvas_is_safe);
   return UNITY_END();
 }

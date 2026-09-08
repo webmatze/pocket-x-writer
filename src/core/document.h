@@ -54,14 +54,31 @@ class Document {
   uint32_t cursor() const { return cursor_; }
   // Snaps to the nearest character boundary at or before `byteOffset`.
   void setCursor(uint32_t byteOffset);
-  void moveLeft();
-  void moveRight();
-  void moveToStart() { cursor_ = 0; }
-  void moveToEnd() { cursor_ = len_; }
-  void moveToLineStart();
-  void moveToLineEnd();
-  void moveWordLeft();
-  void moveWordRight();
+
+  // Every movement takes `extend`: with it the selection grows from its anchor
+  // (Shift+arrow), without it any selection collapses. Keeping it a parameter
+  // rather than a mode means a caller cannot forget to clear the selection.
+  void moveLeft(bool extend = false);
+  void moveRight(bool extend = false);
+  void moveToStart(bool extend = false);
+  void moveToEnd(bool extend = false);
+  void moveToLineStart(bool extend = false);
+  void moveToLineEnd(bool extend = false);
+  void moveWordLeft(bool extend = false);
+  void moveWordRight(bool extend = false);
+
+  // --- selection -----------------------------------------------------------
+  bool hasSelection() const { return hasAnchor_ && anchor_ != cursor_; }
+  uint32_t selectionBegin() const { return hasSelection() ? (anchor_ < cursor_ ? anchor_ : cursor_) : cursor_; }
+  uint32_t selectionEnd() const { return hasSelection() ? (anchor_ > cursor_ ? anchor_ : cursor_) : cursor_; }
+  uint32_t selectionLength() const { return selectionEnd() - selectionBegin(); }
+  void clearSelection() { hasAnchor_ = false; }
+  void selectAll();
+  // Erase the selection. Returns false when there was none.
+  bool deleteSelection();
+  // Copy the selection out. Returns bytes written (0 when there is no
+  // selection); always NUL-terminates when there is room.
+  uint32_t copySelection(char* out, uint32_t outSize) const;
 
   // --- editing -------------------------------------------------------------
   // Insert UTF-8 at the cursor; the cursor ends up after the inserted text.
@@ -90,6 +107,16 @@ class Document {
   uint32_t nextBoundary(uint32_t pos) const;
 
  private:
+  // Shared by every movement: manage the anchor, then run `move`.
+  void withSelection(bool extend, void (Document::*move)());
+  void rawMoveLeft();
+  void rawMoveRight();
+  void rawMoveToStart();
+  void rawMoveToEnd();
+  void rawMoveToLineStart();
+  void rawMoveToLineEnd();
+  void rawMoveWordLeft();
+  void rawMoveWordRight();
   bool rawInsert(uint32_t pos, const char* src, uint32_t n);
   bool rawErase(uint32_t pos, uint32_t n);
   void recordInsert(uint32_t pos, uint32_t n);
@@ -100,6 +127,8 @@ class Document {
   uint32_t cap_;
   uint32_t len_ = 0;
   uint32_t cursor_ = 0;
+  uint32_t anchor_ = 0;
+  bool hasAnchor_ = false;
   bool dirty_ = false;
 
   UndoConfig undo_;

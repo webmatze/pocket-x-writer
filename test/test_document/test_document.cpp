@@ -261,6 +261,138 @@ void test_ctrl_backspace_is_one_undo_step() {
   TEST_ASSERT_EQUAL_STRING("Hallo Welt", d.text());
 }
 
+
+// --- selection ---------------------------------------------------------------
+
+void test_no_selection_by_default() {
+  Document d = makeDoc();
+  type(d, "Hallo");
+  TEST_ASSERT_FALSE(d.hasSelection());
+  TEST_ASSERT_EQUAL_UINT32(0, d.selectionLength());
+}
+
+void test_shift_arrow_extends_from_an_anchor() {
+  Document d = makeDoc();
+  type(d, "Hallo");
+  d.moveLeft(true);
+  d.moveLeft(true);
+  TEST_ASSERT_TRUE(d.hasSelection());
+  TEST_ASSERT_EQUAL_UINT32(3, d.selectionBegin());
+  TEST_ASSERT_EQUAL_UINT32(5, d.selectionEnd());
+  char buf[16];
+  TEST_ASSERT_EQUAL_UINT32(2, d.copySelection(buf, sizeof(buf)));
+  TEST_ASSERT_EQUAL_STRING("lo", buf);
+}
+
+// Selecting must step by character, or a selection edge could split an "ä".
+void test_selection_steps_over_whole_characters() {
+  Document d = makeDoc();
+  type(d, "a\xC3\xA4""b");
+  d.moveLeft(true);          // over 'b'
+  d.moveLeft(true);          // over 'ä', both bytes
+  TEST_ASSERT_EQUAL_UINT32(1, d.selectionBegin());
+  char buf[16];
+  d.copySelection(buf, sizeof(buf));
+  TEST_ASSERT_EQUAL_STRING("\xC3\xA4""b", buf);
+}
+
+// An unshifted arrow collapses the selection instead of moving its edge.
+void test_plain_arrow_clears_the_selection() {
+  Document d = makeDoc();
+  type(d, "Hallo");
+  d.moveLeft(true);
+  TEST_ASSERT_TRUE(d.hasSelection());
+  d.moveLeft(false);
+  TEST_ASSERT_FALSE(d.hasSelection());
+}
+
+void test_selection_can_grow_in_both_directions() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.setCursor(5);
+  d.moveRight(true);
+  d.moveRight(true);
+  TEST_ASSERT_EQUAL_UINT32(5, d.selectionBegin());
+  TEST_ASSERT_EQUAL_UINT32(7, d.selectionEnd());
+  d.moveLeft(true);
+  d.moveLeft(true);
+  d.moveLeft(true);
+  TEST_ASSERT_EQUAL_UINT32(4, d.selectionBegin());
+  TEST_ASSERT_EQUAL_UINT32(5, d.selectionEnd());   // anchor stayed at 5
+}
+
+void test_shift_ctrl_arrow_selects_words() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.moveToStart();
+  d.moveWordRight(true);
+  char buf[32];
+  d.copySelection(buf, sizeof(buf));
+  TEST_ASSERT_EQUAL_STRING("Hallo ", buf);
+}
+
+void test_select_all() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.selectAll();
+  TEST_ASSERT_EQUAL_UINT32(0, d.selectionBegin());
+  TEST_ASSERT_EQUAL_UINT32(10, d.selectionEnd());
+}
+
+void test_typing_replaces_the_selection() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.moveWordLeft(true);          // select "Welt"
+  type(d, "Du");
+  TEST_ASSERT_EQUAL_STRING("Hallo Du", d.text());
+  TEST_ASSERT_FALSE(d.hasSelection());
+}
+
+void test_backspace_deletes_the_selection() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.moveWordLeft(true);
+  TEST_ASSERT_TRUE(d.backspace());
+  TEST_ASSERT_EQUAL_STRING("Hallo ", d.text());
+}
+
+void test_deleting_a_selection_is_one_undo_step() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.breakUndoGroup();
+  d.selectAll();
+  d.deleteSelection();
+  TEST_ASSERT_EQUAL_STRING("", d.text());
+  TEST_ASSERT_TRUE(d.undo());
+  TEST_ASSERT_EQUAL_STRING("Hallo Welt", d.text());
+}
+
+void test_copy_without_a_selection_yields_nothing() {
+  Document d = makeDoc();
+  type(d, "Hallo");
+  char buf[16] = "x";
+  TEST_ASSERT_EQUAL_UINT32(0, d.copySelection(buf, sizeof(buf)));
+}
+
+// A short buffer must truncate rather than overrun.
+void test_copy_respects_the_destination_size() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.selectAll();
+  char buf[5];
+  const uint32_t n = d.copySelection(buf, sizeof(buf));
+  TEST_ASSERT_EQUAL_UINT32(4, n);
+  TEST_ASSERT_EQUAL_STRING("Hall", buf);
+}
+
+void test_setCursor_clears_the_selection() {
+  Document d = makeDoc();
+  type(d, "Hallo");
+  d.selectAll();
+  d.setCursor(2);
+  TEST_ASSERT_FALSE(d.hasSelection());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_starts_empty);
@@ -287,5 +419,18 @@ int main(int, char**) {
   RUN_TEST(test_ctrl_backspace_keeps_umlauts_whole);
   RUN_TEST(test_ctrl_backspace_at_the_start_is_a_no_op);
   RUN_TEST(test_ctrl_backspace_is_one_undo_step);
+  RUN_TEST(test_no_selection_by_default);
+  RUN_TEST(test_shift_arrow_extends_from_an_anchor);
+  RUN_TEST(test_selection_steps_over_whole_characters);
+  RUN_TEST(test_plain_arrow_clears_the_selection);
+  RUN_TEST(test_selection_can_grow_in_both_directions);
+  RUN_TEST(test_shift_ctrl_arrow_selects_words);
+  RUN_TEST(test_select_all);
+  RUN_TEST(test_typing_replaces_the_selection);
+  RUN_TEST(test_backspace_deletes_the_selection);
+  RUN_TEST(test_deleting_a_selection_is_one_undo_step);
+  RUN_TEST(test_copy_without_a_selection_yields_nothing);
+  RUN_TEST(test_copy_respects_the_destination_size);
+  RUN_TEST(test_setCursor_clears_the_selection);
   return UNITY_END();
 }

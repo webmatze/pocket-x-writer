@@ -53,6 +53,10 @@ Rect drawText(const Canvas& canvas, const Font& font, int32_t x, int32_t baselin
 // Fill a rectangle. `black` false paints white (the page colour).
 void fillRect(const Canvas& canvas, const Rect& r, bool black);
 
+// Flip every pixel in a rectangle. Used to show a selection: drawing the text
+// first and inverting afterwards avoids needing a white-ink draw path.
+void invertRect(const Canvas& canvas, const Rect& r);
+
 }  // namespace pocketx
 
 namespace pocketx {

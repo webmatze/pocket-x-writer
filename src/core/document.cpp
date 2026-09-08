@@ -33,6 +33,7 @@ Document::Document(char* storage, uint32_t capacity, const UndoConfig& undo)
 void Document::clear() {
   len_ = 0;
   cursor_ = 0;
+  hasAnchor_ = false;
   undoCount_ = 0;
   arenaUsed_ = 0;
   if (buf_ && cap_) buf_[0] = 0;
@@ -58,39 +59,77 @@ void Document::setCursor(uint32_t byteOffset) {
   // Snap back onto a character boundary so a cursor can never split an "ä".
   while (byteOffset > 0 && isContinuation(buf_[byteOffset])) --byteOffset;
   cursor_ = byteOffset;
+  hasAnchor_ = false;
   breakUndoGroup();
 }
 
-void Document::moveLeft() {
-  cursor_ = prevBoundary(cursor_);
+void Document::withSelection(bool extend, void (Document::*move)()) {
+  if (extend) {
+    if (!hasAnchor_) { anchor_ = cursor_; hasAnchor_ = true; }
+  } else {
+    hasAnchor_ = false;
+  }
+  (this->*move)();
   breakUndoGroup();
 }
 
-void Document::moveRight() {
-  cursor_ = nextBoundary(cursor_);
-  breakUndoGroup();
-}
+void Document::moveLeft(bool e)        { withSelection(e, &Document::rawMoveLeft); }
+void Document::moveRight(bool e)       { withSelection(e, &Document::rawMoveRight); }
+void Document::moveToStart(bool e)     { withSelection(e, &Document::rawMoveToStart); }
+void Document::moveToEnd(bool e)       { withSelection(e, &Document::rawMoveToEnd); }
+void Document::moveToLineStart(bool e) { withSelection(e, &Document::rawMoveToLineStart); }
+void Document::moveToLineEnd(bool e)   { withSelection(e, &Document::rawMoveToLineEnd); }
+void Document::moveWordLeft(bool e)    { withSelection(e, &Document::rawMoveWordLeft); }
+void Document::moveWordRight(bool e)   { withSelection(e, &Document::rawMoveWordRight); }
 
-void Document::moveToLineStart() {
+void Document::rawMoveLeft() { cursor_ = prevBoundary(cursor_); }
+void Document::rawMoveRight() { cursor_ = nextBoundary(cursor_); }
+void Document::rawMoveToStart() { cursor_ = 0; }
+void Document::rawMoveToEnd() { cursor_ = len_; }
+
+void Document::rawMoveToLineStart() {
   while (cursor_ > 0 && buf_[cursor_ - 1] != '\n') --cursor_;
-  breakUndoGroup();
 }
 
-void Document::moveToLineEnd() {
+void Document::rawMoveToLineEnd() {
   while (cursor_ < len_ && buf_[cursor_] != '\n') ++cursor_;
-  breakUndoGroup();
 }
 
-void Document::moveWordLeft() {
+void Document::rawMoveWordLeft() {
   while (cursor_ > 0 && !isWordByte(buf_[prevBoundary(cursor_)])) cursor_ = prevBoundary(cursor_);
   while (cursor_ > 0 && isWordByte(buf_[prevBoundary(cursor_)])) cursor_ = prevBoundary(cursor_);
+}
+
+void Document::rawMoveWordRight() {
+  while (cursor_ < len_ && isWordByte(buf_[cursor_])) cursor_ = nextBoundary(cursor_);
+  while (cursor_ < len_ && !isWordByte(buf_[cursor_])) cursor_ = nextBoundary(cursor_);
+}
+
+void Document::selectAll() {
+  anchor_ = 0;
+  hasAnchor_ = true;
+  cursor_ = len_;
   breakUndoGroup();
 }
 
-void Document::moveWordRight() {
-  while (cursor_ < len_ && isWordByte(buf_[cursor_])) cursor_ = nextBoundary(cursor_);
-  while (cursor_ < len_ && !isWordByte(buf_[cursor_])) cursor_ = nextBoundary(cursor_);
-  breakUndoGroup();
+uint32_t Document::copySelection(char* out, uint32_t outSize) const {
+  if (!hasSelection() || !out || outSize == 0) return 0;
+  uint32_t n = selectionLength();
+  if (n > outSize - 1) n = outSize - 1;
+  memcpy(out, buf_ + selectionBegin(), n);
+  out[n] = 0;
+  return n;
+}
+
+bool Document::deleteSelection() {
+  if (!hasSelection()) return false;
+  const uint32_t from = selectionBegin();
+  const uint32_t n = selectionLength();
+  recordErase(from, buf_ + from, n);
+  if (!rawErase(from, n)) return false;
+  cursor_ = from;
+  hasAnchor_ = false;
+  return true;
 }
 
 bool Document::rawInsert(uint32_t pos, const char* src, uint32_t n) {
@@ -168,6 +207,8 @@ void Document::breakUndoGroup() {
 
 bool Document::insert(const char* utf8, uint32_t len) {
   if (!utf8 || len == 0) return false;
+  // Typing with a selection active replaces it, as every editor does.
+  if (hasSelection()) deleteSelection();
   // A run break makes undo step by word instead of swallowing a whole paragraph.
   const bool boundary = len == 1 && (utf8[0] == ' ' || utf8[0] == '\n' || utf8[0] == '\t');
   if (!rawInsert(cursor_, utf8, len)) return false;
@@ -182,6 +223,7 @@ bool Document::insert(const char* utf8) {
 }
 
 bool Document::backspace() {
+  if (hasSelection()) return deleteSelection();
   if (cursor_ == 0) return false;
   const uint32_t from = prevBoundary(cursor_);
   const uint32_t n = cursor_ - from;
@@ -192,6 +234,7 @@ bool Document::backspace() {
 }
 
 bool Document::deleteWordBefore() {
+  if (hasSelection()) return deleteSelection();
   if (cursor_ == 0) return false;
   uint32_t from = cursor_;
   // Trailing whitespace belongs to the deletion: pressing Ctrl+Backspace after
@@ -208,6 +251,7 @@ bool Document::deleteWordBefore() {
 }
 
 bool Document::deleteForward() {
+  if (hasSelection()) return deleteSelection();
   if (cursor_ >= len_) return false;
   const uint32_t to = nextBoundary(cursor_);
   const uint32_t n = to - cursor_;

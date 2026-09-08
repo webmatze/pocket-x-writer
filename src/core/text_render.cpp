@@ -82,6 +82,16 @@ void fillRect(const Canvas& c, const Rect& r, bool black) {
     for (int32_t x = r.x; x < r.x + r.w; ++x) setPixel(c, x, y, black);
 }
 
+void invertRect(const Canvas& c, const Rect& r) {
+  for (int32_t y = r.y; y < r.y + r.h; ++y) {
+    if (y < 0 || y >= c.height) continue;
+    for (int32_t x = r.x; x < r.x + r.w; ++x) {
+      if (x < 0 || x >= c.width) continue;
+      c.bits[(uint32_t)y * c.stride + (uint32_t)(x >> 3)] ^= (uint8_t)(0x80u >> (x & 7));
+    }
+  }
+}
+
 Rect drawText(const Canvas& c, const Font& font, int32_t x, int32_t baselineY, const char* utf8) {
   Rect damage;
   if (!utf8 || !c.bits) return damage;
