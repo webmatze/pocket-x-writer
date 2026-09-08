@@ -4,6 +4,32 @@ The ESP32-S3 has **no Bluetooth Classic (BR/EDR) radio**. Only Bluetooth Low
 Energy HID keyboards can ever work with this device. This is silicon, not
 firmware — no amount of code changes it.
 
+## Confirmed working: Keychron K2 HE
+
+Found by name with the HID flag at -45 dBm, connected, and typing verified on
+hardware. Bonds persist in NVS, so it auto-reconnects.
+
+The physical keyboard is a German ISO layout, which the keymap handles
+correctly — the key labelled `y` sits where US layouts put `z` and therefore
+sends usage 0x1D:
+
+| key pressed | HID usage | our DE map | SDK's US map |
+|---|---|---|---|
+| `y` | 0x1D | **y** | z |
+| `z` | 0x1C | **z** | y |
+| `Shift+2` | 0x1F + shift | **"** | @ |
+| key right of L | 0x33 | **ö** | ; |
+| `AltGr+Q` | 0x14 + RAlt | **@** | q |
+| `AltGr+E` | 0x08 + RAlt | **€** | e |
+
+Without the German map, pressing `y` would type `z` and `Shift+2` would give
+`@` — the labels on the caps would not match the screen.
+
+A useful pre-purchase signal seen here: the K2 HE reports a 125 Hz Bluetooth
+signal rate, which matches BLE's 7.5 ms connection interval (~133 Hz). Long
+quoted battery life (110 h) points the same way. Neither is proof — confirm with
+the macOS check below.
+
 ## The Keychron K3 (this unit) does NOT work
 
 Tested on hardware, 2026-09-08. Three independent findings, all pointing the
