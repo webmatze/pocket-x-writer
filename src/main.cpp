@@ -589,7 +589,11 @@ void loop() {
     if (ev.keycode == 0x39) continue;
 
     bool changed = false;
-    const bool ctrl = ev.mods & (pocketx::kModLCtrl | pocketx::kModRCtrl);
+    // Command counts as Control for editor shortcuts, so the same keys work
+    // whichever host mode the keyboard is switched to. deTranslate already
+    // refuses GUI chords, so this cannot swallow text.
+    const bool ctrl = ev.mods & (pocketx::kModLCtrl | pocketx::kModRCtrl |
+                                 pocketx::kModLGui | pocketx::kModRGui);
     const bool shift = ev.mods & (pocketx::kModLShift | pocketx::kModRShift);
 
     // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
@@ -645,6 +649,12 @@ void loop() {
           if (gChapterIndex + 1 < gChapterCount) openChapter(gChapterIndex + 1);
           break;
         case freeink::SpecialKey::None: {
+          if (ctrl) {
+            // An unbound chord would otherwise disappear without trace, which is
+            // exactly how the Cmd-vs-Ctrl mismatch stayed hidden.
+            Serial.printf("[key] unbound chord: usage=0x%02X mods=0x%02X\n", ev.keycode, ev.mods);
+            break;
+          }
           pocketx::KeyText txt;
           if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) break;
           if (txt.consumedAsDead) break;          // dead key armed, nothing to insert yet
