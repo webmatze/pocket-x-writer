@@ -356,6 +356,8 @@ void loop() {
       continue;
     }
     if (ev.special != freeink::SpecialKey::None) {
+      // Navigation keys are recognised but not yet acted on -- cursor movement
+      // arrives with the editor core.
       Serial.printf("[key] special=%u\n", (unsigned)ev.special);
       continue;
     }
