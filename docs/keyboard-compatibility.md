@@ -18,6 +18,11 @@ same way:
 Crucially, the same scan that missed the keyboard **did** flag a neighbour's
 Sky Q remote as `HID`. Our detection works; the keyboard is simply not on BLE.
 
+Retested in the keyboard's **Windows/Android mode** (some keyboards run a
+different Bluetooth stack per host mode): still nothing. No advertisement from
+the K3, and no device above -60 dBm at all during a 90 s continuous scan. It
+does not speak BLE in either mode.
+
 The keyboard reports manufacturer ID `0x05AC` and product ID `0x0250` — it
 presents itself as an Apple keyboard, which is how Keychron gets seamless macOS
 support. Firmware 1.0.1.
