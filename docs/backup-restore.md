@@ -1,0 +1,85 @@
+# Device backup & restore
+
+The Xteink X4 Pro's flash holds everything: bootloader, partition table, both
+app slots, and the NVS namespace with the OEM panel calibration. A full 16 MB
+dump is therefore a complete, restorable snapshot of the device.
+
+## Take a backup
+
+```bash
+./scripts/backup-device.sh --label crosspoint
+```
+
+Auto-detects the port, reads all 16 MB (~1.5 min), hashes it, and then
+**verifies it against the device** before declaring success. If verification
+fails the script exits non-zero and marks the manifest `DO NOT TRUST`.
+
+Output lands in `backups/<timestamp>-<mac>-<label>/`:
+
+| file | purpose |
+|---|---|
+| `flash-full-16mb.bin` | the image |
+| `SHA256SUMS` | integrity check, verified before any restore |
+| `manifest.txt` | MAC, chip, esptool version, label, verification status |
+| `flash-id.txt` | flash type and eFuse settings, for diagnosing restores |
+| `verify.log` | output of the post-backup verification |
+
+## Verify an existing backup
+
+```bash
+./scripts/verify-device.sh backups/<name>
+```
+
+Read-only. Checks the local checksum, then compares the image against the
+device. Worth running before you flash anything experimental.
+
+## Restore
+
+```bash
+./scripts/restore-device.sh backups/<name>
+```
+
+Three guards, in order:
+
+1. **Checksum first** — refuses to flash an image that fails its own SHA256, so
+   a corrupt file can never reach the device.
+2. **MAC match** — refuses if the backup came from a different unit. The dump
+   contains that unit's OEM `hw_calib` NVS namespace, which names its panel
+   controller; restoring it elsewhere can misidentify the display. Override with
+   `--force-mac` only if you know why.
+3. **Typed confirmation** — you must type `RESTORE`.
+
+It writes with `--flash-mode keep --flash-freq keep --flash-size keep`. Without
+`keep`, esptool rewrites the bootloader header and what lands on the device is
+*not* byte-identical to what you captured.
+
+Hold the **Power button** throughout flashing; release after verification.
+
+> **Store a copy off the repo.** `backups/` is gitignored (a 16 MB binary does
+> not belong in git), so a clean checkout will not have it. Copy the directory
+> somewhere durable — external disk, Time Machine, cloud.
+
+## Recovery when USB is not an option
+
+If the device ever stops enumerating over USB, the SD-card path is the
+fallback — it is how locked units are flashed and how bricked units recover.
+USB has worked on this unit (it is an unlocked xteink.com device), so this is a
+safety net, not the primary route.
+
+## Partition layout
+
+Read from this device's own backup:
+
+| label | type | subtype | offset | size |
+|---|---|---|---|---|
+| `nvs` | data | nvs | `0x9000` | `0x5000` |
+| `otadata` | data | ota | `0xe000` | `0x2000` |
+| `app0` | app | ota_0 | `0x10000` | `0x7e0000` (~7.9 MB) |
+| `app1` | app | ota_1 | `0x7f0000` | `0x7e0000` (~7.9 MB) |
+| `spiffs` | data | spiffs | `0xfd0000` | `0x14000` |
+| `coredump` | data | coredump | `0xfe4000` | `0x1c000` |
+
+**Two OTA app slots, ~7.9 MB each.** That settles the dual-boot question left
+open in the plan: the layout already supports a reader in one slot and PocketX
+Writer in the other, and our firmware currently uses 497 KB — roughly 6% of one
+slot. No partition changes needed.
