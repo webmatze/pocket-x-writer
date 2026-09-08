@@ -168,3 +168,43 @@ coredump, data, coredump,0xfe4000, 0x1c000
 
 Safer still, and what we do: flash **only** the application binary to its slot
 offset, leaving bootloader and partition table untouched.
+
+## Dual boot: verified on hardware
+
+A full round trip was tested on this device on 2026-09-08:
+
+1. `./scripts/select-slot.py --slot 1` → readback confirmed app1
+2. Device rebooted into the **original Xteink firmware** — confirmed on screen
+3. `./scripts/select-slot.py --slot 0` → readback confirmed app0
+4. Device back on CrossPoint
+
+Both firmwares boot from their slots and the switch is reversible from the Mac
+with no device interaction. **Dual boot works.**
+
+### The USB port drops during the reboot
+
+Right after a slot switch, esptool hard-resets the device and
+`/dev/cu.usbmodem*` disappears for a few seconds while it comes back up. That is
+the reboot, not a failure — wait for the port instead of concluding the firmware
+is dead:
+
+```bash
+until ls /dev/cu.usbmodem* >/dev/null 2>&1; do sleep 1; done
+```
+
+### Forcing ROM download mode
+
+If an application ever bootloops or stops enumerating, the ESP32-S3's download
+mode lives in ROM and is always reachable. On this device the **Left nav button
+is GPIO0** — the boot strap:
+
+| button | GPIO | note |
+|---|---|---|
+| Left | **0** | **boot strap** — hold during reset for download mode |
+| Right | 7 | |
+| Power | 3 | |
+| Home | — | capacitive, via the GT911 touch controller |
+
+Hold **Left** while resetting to drop into ROM download mode, then flash
+normally. This is why GPIO0 is safe as a button in normal use but must not be
+held at reset unless you *want* download mode.
