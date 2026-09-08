@@ -359,7 +359,7 @@ void enterUsbTransfer() {
   pocketx::drawText(canvas, kFont, kMargin, 120, "USB-Transfer aktiv");
   pocketx::drawText(canvas, kFont, kMargin, 170, "Die SD-Karte liegt jetzt am Mac.");
   pocketx::drawText(canvas, kFont, kMargin, 210, "Nach dem Auswerfen startet das");
-  pocketx::drawText(canvas, kFont, kMargin, 250, "Ger\xC3\xA4t neu.");
+  pocketx::drawText(canvas, kFont, kMargin, 250, "Gerät neu.");
   display.displayBuffer(EInkDisplay::FULL_REFRESH);
 
   auto& sd = SDCardManager::getInstance();
@@ -416,8 +416,8 @@ void sleepNow() {
   uint8_t* fb = display.getFrameBuffer();
   const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
   memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
-  pocketx::drawText(canvas, kFont, kMargin, 160, "Schl\xC3\xA4ft.");
-  pocketx::drawText(canvas, kFont, kMargin, 210, "Power-Taste weckt das Ger\xC3\xA4t.");
+  pocketx::drawText(canvas, kFont, kMargin, 160, "Schläft.");
+  pocketx::drawText(canvas, kFont, kMargin, 210, "Power-Taste weckt das Gerät.");
   pocketx::drawText(canvas, kFont, kMargin, 260, "Alles gespeichert.");
   display.displayBuffer(EInkDisplay::FULL_REFRESH);
 
