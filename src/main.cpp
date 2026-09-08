@@ -16,6 +16,8 @@
 
 #include <BleKeyboardHost.h>
 #include <BoardConfig.h>
+#include <SDCardManager.h>
+#include <UsbMassStorage.h>
 #include <EInkDisplay.h>
 #include <XteinkDetect.h>
 
@@ -76,6 +78,12 @@ uint16_t gChapterIndex = 0;
 // Words already written when the chapter was opened, so the goal measures
 // today's output rather than the chapter's total length.
 uint32_t gWordsAtOpen = 0;
+
+// USB transfer mode. Once the filesystem is handed to the host, this firmware
+// must not touch the card again -- the SDK's contract is explicit that the owner
+// suspends all filesystem use before begin() and reboots afterwards.
+freeink::UsbMassStorage gMsc;
+bool gUsbMode = false;
 // Idle before an automatic save. Long enough not to save mid-word, short enough
 // that a flat battery costs a sentence rather than a session.
 constexpr uint32_t kAutosaveIdleMs = 8000;
@@ -208,6 +216,49 @@ void newChapter() {
   gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
   for (uint16_t i = 0; i < gChapterCount; ++i)
     if (gChapters[i].number == c.number) { openChapter(i); return; }
+}
+
+// Hand the SD card to the Mac over the same USB-C cable that powers the device.
+// Everything is drawn BEFORE the filesystem is detached, because afterwards the
+// card belongs to the host and any access from here would race it.
+void enterUsbTransfer() {
+  if (gUsbMode) return;
+  saveCurrentChapter();
+
+  uint8_t* fb = display.getFrameBuffer();
+  const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
+  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+  pocketx::drawText(canvas, kFont, kMargin, 120, "USB-Transfer aktiv");
+  pocketx::drawText(canvas, kFont, kMargin, 170, "Die SD-Karte liegt jetzt am Mac.");
+  pocketx::drawText(canvas, kFont, kMargin, 210, "Nach dem Auswerfen startet das");
+  pocketx::drawText(canvas, kFont, kMargin, 250, "Ger\xC3\xA4t neu.");
+  display.displayBuffer(EInkDisplay::FULL_REFRESH);
+
+  auto& sd = SDCardManager::getInstance();
+  FsBlockDeviceInterface* dev = sd.detachFilesystemForRawAccess();
+  if (!dev || !gMsc.begin(dev)) {
+    Serial.println("[usb] could not start mass storage");
+    pocketx::drawText(canvas, kFont, kMargin, 320, "Fehler: kein Zugriff auf die Karte");
+    display.displayBuffer(EInkDisplay::FAST_REFRESH);
+    return;
+  }
+  gUsbMode = true;
+  Serial.println("[usb] mass storage active — waiting for the host");
+}
+
+// The card cannot be safely shared, so the way back is a reboot: it remounts the
+// filesystem cleanly and reloads the chapter, including anything the Mac wrote.
+void pollUsbTransfer() {
+  if (!gUsbMode) return;
+  const auto st = gMsc.state();
+  if (st == freeink::UsbMassStorageState::Ejected ||
+      st == freeink::UsbMassStorageState::Disconnected) {
+    Serial.println("[usb] host finished — rebooting to remount");
+    gMsc.end();
+    Serial.flush();
+    delay(200);
+    esp_restart();
+  }
 }
 
 void bootOtherSlot() {
@@ -450,6 +501,7 @@ void setup() {
 void loop() {
   auto& ble = freeink::BleKeyboardHost::getInstance();
   ble.poll();
+  pollUsbTransfer();
   pollSwitchButton();
   handleScanResults();
   pollHunt();
@@ -481,6 +533,12 @@ void loop() {
     // Ctrl+Z is undo. On a German keyboard the Z cap is HID usage 0x1C -- using
     // 0x1D here would bind the key labelled Y.
     // Ctrl+S saves immediately.
+    if (gUsbMode) continue;                   // the card belongs to the host now
+
+    if (ctrl && ev.keycode == 0x18) {          // Ctrl+U: USB transfer
+      enterUsbTransfer();
+      continue;
+    }
     if (ctrl && ev.keycode == 0x16) {          // Ctrl+S
       saveCurrentChapter();
       changed = true;
@@ -530,7 +588,7 @@ void loop() {
 
   // Autosave: only when the document actually changed and the writer has paused.
   // Saving mid-keystroke would stall input for no benefit.
-  if (gDoc->dirty() && gLastEditAt && millis() - gLastEditAt >= kAutosaveIdleMs) {
+  if (!gUsbMode && gDoc->dirty() && gLastEditAt && millis() - gLastEditAt >= kAutosaveIdleMs) {
     gLastEditAt = 0;
     saveCurrentChapter();
     gDirty = true;              // refresh so the status line reflects the result
@@ -538,7 +596,7 @@ void loop() {
   }
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
-  if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
+  if (!gUsbMode && gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
     char status[128];
     const char* saveState = gSaveFailed          ? "NICHT GESPEICHERT"
                             : gDoc->dirty()      ? "*"
