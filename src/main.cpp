@@ -76,7 +76,11 @@ constexpr uint16_t kRowBytes = kW / 8;
 constexpr int32_t kMargin = 24;
 constexpr int32_t kTextTop = 56;
 constexpr uint32_t kTextWidth = kW - 2 * kMargin;
-constexpr uint16_t kMaxLines = 32;
+// Lines the panel can show at once. The LAYOUT has no limit -- wrapScan streams
+// lines and the view keeps only these. A fixed array here used to cap the
+// layout of the whole document, which silently swallowed every chapter past
+// roughly 270 words.
+constexpr uint16_t kMaxVisibleLines = 24;
 
 const pocketx::Font& kFont = freeink::ui::kNotoSans261bppFont;
 
@@ -174,10 +178,13 @@ uint32_t gLastEditAt = 0;
 uint32_t gLastActivityAt = 0;
 uint32_t gLastSaveAt = 0;
 bool gSaveFailed = false;
-uint16_t gScrollLine = 0;   // first wrapped line drawn
+// Byte offset of the first drawn line. A byte offset rather than a line number
+// because line numbers shift under every edit above the viewport, while a byte
+// offset only moves when the text before it does.
+uint32_t gScrollByte = 0;
 
 // Where the cursor sits in the wrapped layout, recomputed on each redraw.
-uint16_t gCursorLine = 0;
+uint32_t gCursorLine = 0;
 int32_t gCursorX = 0;
 
 // Lay out the document, work out where the cursor is, scroll so it stays
@@ -190,64 +197,92 @@ void redraw(uint8_t* fb, const char* status) {
   pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
 
   const char* text = gDoc->text();
-  static pocketx::Line lines[kMaxLines];
-  uint16_t n = pocketx::wrapText(kFont, text, kTextWidth, lines, kMaxLines);
-  if (!n) { lines[0] = pocketx::Line{0, 0}; n = 1; }
-
-  // Locate the cursor in the wrapped layout. The cursor belongs to the last
-  // line whose start is at or before it, so a cursor sitting exactly on a line
-  // break lands at the start of the new line rather than trailing the old one.
   const uint32_t cur = gDoc->cursor();
-  gCursorLine = 0;
-  for (uint16_t i = 0; i < n; ++i)
-    if (lines[i].begin <= cur) gCursorLine = i;
+  const uint16_t fits = (kH - kTextTop) / kFont.yAdvance;
+
+  // Pass 1 locates the cursor and resolves the scroll anchor, storing nothing.
+  // Walking the chapter twice costs O(document) in glyph lookups, which against
+  // a ~550 ms panel refresh is not the bottleneck -- the same trade the document
+  // buffer makes. What it buys is a layout with no ceiling and no cache.
+  struct Probe {
+    uint32_t cursor, anchor, cursorLine, anchorLine;
+  };
+  Probe probe{cur, gScrollByte, 0, 0};
+  pocketx::wrapScan(kFont, text, kTextWidth,
+                    [](void* p, uint32_t idx, pocketx::Line l) {
+                      auto* q = static_cast<Probe*>(p);
+                      if (l.begin <= q->cursor) q->cursorLine = idx;
+                      if (l.begin <= q->anchor) q->anchorLine = idx;
+                    },
+                    &probe);
+  gCursorLine = probe.cursorLine;
+
+  // Keep the cursor on screen without jumping the page around more than needed.
+  uint32_t scrollLine = probe.anchorLine;
+  if (gCursorLine < scrollLine) scrollLine = gCursorLine;
+  if (gCursorLine >= scrollLine + fits) scrollLine = gCursorLine - fits + 1;
+
+  // Pass 2 keeps only the lines about to be drawn.
+  struct Window {
+    uint32_t first, want;
+    pocketx::Line* out;
+    uint32_t stored;
+  };
+  static pocketx::Line win[kMaxVisibleLines];
+  Window w{scrollLine, fits < kMaxVisibleLines ? fits : kMaxVisibleLines, win, 0};
+  pocketx::wrapScan(kFont, text, kTextWidth,
+                    [](void* p, uint32_t idx, pocketx::Line l) {
+                      auto* q = static_cast<Window*>(p);
+                      if (idx >= q->first && q->stored < q->want) q->out[q->stored++] = l;
+                    },
+                    &w);
+  const uint32_t n = w.stored;
+  if (!n) return;                 // wrapScan always yields a line, even for ""
+  gScrollByte = win[0].begin;
+
+  const uint32_t curRow = gCursorLine - scrollLine < n ? gCursorLine - scrollLine : 0;
 
   char buf[512];
   {
-    uint32_t len = cur - lines[gCursorLine].begin;
+    uint32_t len = cur - win[curRow].begin;
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-    memcpy(buf, text + lines[gCursorLine].begin, len);
+    memcpy(buf, text + win[curRow].begin, len);
     buf[len] = 0;
     gCursorX = kMargin + (int32_t)pocketx::measureText(kFont, buf);
   }
-
-  const uint16_t fits = (kH - kTextTop) / kFont.yAdvance;
-  // Keep the cursor on screen without jumping the page around more than needed.
-  if (gCursorLine < gScrollLine) gScrollLine = gCursorLine;
-  if (gCursorLine >= gScrollLine + fits) gScrollLine = gCursorLine - fits + 1;
-  if (gScrollLine > n) gScrollLine = n ? n - 1 : 0;
 
   const uint32_t selFrom = gDoc->selectionBegin();
   const uint32_t selTo = gDoc->selectionEnd();
   const bool hasSel = gDoc->hasSelection();
 
   int32_t y = kTextTop + kFont.ascent;
-  for (uint16_t i = gScrollLine; i < n && i < gScrollLine + fits; ++i) {
-    uint32_t len = lines[i].end - lines[i].begin;
+  for (uint32_t i = 0; i < n; ++i) {
+    const pocketx::Line& line = win[i];
+    uint32_t len = line.end - line.begin;
     if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-    memcpy(buf, text + lines[i].begin, len);
+    memcpy(buf, text + line.begin, len);
     buf[len] = 0;
     pocketx::drawText(canvas, kFont, kMargin, y, buf);
 
     // Invert the part of this line that falls inside the selection. Drawing the
     // text first and flipping afterwards avoids a white-ink draw path, and on a
     // 1-bit panel white-on-black is unmistakable even against ghost residue.
-    if (hasSel && selTo > lines[i].begin && selFrom < lines[i].end) {
-      const uint32_t a = selFrom > lines[i].begin ? selFrom : lines[i].begin;
-      const uint32_t b = selTo < lines[i].end ? selTo : lines[i].end;
+    if (hasSel && selTo > line.begin && selFrom < line.end) {
+      const uint32_t a = selFrom > line.begin ? selFrom : line.begin;
+      const uint32_t b = selTo < line.end ? selTo : line.end;
       char head[512];
-      uint32_t hn = a - lines[i].begin;
+      uint32_t hn = a - line.begin;
       if (hn > sizeof(head) - 1) hn = sizeof(head) - 1;
-      memcpy(head, text + lines[i].begin, hn); head[hn] = 0;
+      memcpy(head, text + line.begin, hn); head[hn] = 0;
       const int32_t x0 = kMargin + (int32_t)pocketx::measureText(kFont, head);
       uint32_t mn = b - a;
       if (mn > sizeof(head) - 1) mn = sizeof(head) - 1;
       memcpy(head, text + a, mn); head[mn] = 0;
-      int32_t w = (int32_t)pocketx::measureText(kFont, head);
+      int32_t w2 = (int32_t)pocketx::measureText(kFont, head);
       // A selected newline shows as a thin bar, so an empty line still reads
       // as part of the selection rather than vanishing from it.
-      if (w == 0) w = 6;
-      pocketx::invertRect(canvas, pocketx::Rect{x0, y - kFont.ascent, w, kFont.yAdvance - 2});
+      if (w2 == 0) w2 = 6;
+      pocketx::invertRect(canvas, pocketx::Rect{x0, y - kFont.ascent, w2, kFont.yAdvance - 2});
     }
     y += kFont.yAdvance;
   }
@@ -256,7 +291,7 @@ void redraw(uint8_t* fb, const char* status) {
   // several of them visible at once. A solid block with a baseline foot reads as
   // one unmistakable mark even against residue.
   if (!hasSel) {
-    const int32_t caretY = kTextTop + (int32_t)(gCursorLine - gScrollLine) * kFont.yAdvance;
+    const int32_t caretY = kTextTop + (int32_t)curRow * kFont.yAdvance;
     pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 3, 5, kFont.ascent - 1}, true);
     pocketx::fillRect(canvas, pocketx::Rect{gCursorX - 2, caretY + kFont.ascent + 2, 11, 3}, true);
   }
@@ -266,17 +301,33 @@ void redraw(uint8_t* fb, const char* status) {
 // the wrapped layout, which only the layout knows.
 void moveCursorVertically(int dir, bool extend) {
   const char* text = gDoc->text();
-  static pocketx::Line lines[kMaxLines];
-  const uint16_t n = pocketx::wrapText(kFont, text, kTextWidth, lines, kMaxLines);
-  if (!n) return;
-
   const uint32_t cur = gDoc->cursor();
-  uint16_t line = 0;
-  for (uint16_t i = 0; i < n; ++i)
-    if (lines[i].begin <= cur) line = i;
 
-  const int32_t target = dir < 0 ? (int32_t)line - 1 : (int32_t)line + 1;
-  if (target < 0 || target >= n) {
+  // One scan yields everything vertical movement needs: the cursor's own line,
+  // the one before it and the one after. Nothing is stored beyond those three,
+  // so a long chapter costs the same memory as a short one.
+  struct VProbe {
+    uint32_t cursor;
+    pocketx::Line prev{}, at{}, next{};
+    bool seen = false, hasPrev = false, hasNext = false;
+  };
+  VProbe v{cur};
+  pocketx::wrapScan(kFont, text, kTextWidth,
+                    [](void* p, uint32_t, pocketx::Line l) {
+                      auto* q = static_cast<VProbe*>(p);
+                      if (l.begin <= q->cursor) {
+                        if (q->seen) { q->prev = q->at; q->hasPrev = true; }
+                        q->at = l;
+                        q->seen = true;
+                      } else if (!q->hasNext) {
+                        q->next = l;
+                        q->hasNext = true;
+                      }
+                    },
+                    &v);
+  if (!v.seen) return;
+
+  if (dir < 0 ? !v.hasPrev : !v.hasNext) {
     // No line to move to -- but the keypress must still resolve the selection.
     // Returning early here is why Ctrl+A followed by Down left the whole page
     // highlighted with no way out: Up happened to work only because it reached
@@ -289,13 +340,13 @@ void moveCursorVertically(int dir, bool extend) {
   // Preserve the visual column: walk the target line until the pen passes the
   // cursor's x. Character widths differ, so this is a search, not arithmetic.
   char buf[512];
-  uint32_t len = lines[gCursorLine].end - lines[gCursorLine].begin;
+  uint32_t len = cur - v.at.begin;
   if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
-  memcpy(buf, text + lines[gCursorLine].begin, cur - lines[gCursorLine].begin);
-  buf[cur - lines[gCursorLine].begin] = 0;
+  memcpy(buf, text + v.at.begin, len);
+  buf[len] = 0;
   const uint32_t wantX = pocketx::measureText(kFont, buf);
 
-  const pocketx::Line& tl = lines[target];
+  const pocketx::Line& tl = dir < 0 ? v.prev : v.next;
   uint32_t best = tl.begin, x = 0;
   for (uint32_t i = tl.begin; i < tl.end;) {
     uint32_t cp = 0;
@@ -327,7 +378,15 @@ void openChapter(uint16_t index) {
   gChapterIndex = index;
   gStorage.loadChapter(*gDoc, gChapters[index]);
   gWordsAtOpen = pocketx::countWords(gDoc->text());
-  gScrollLine = 0;
+  gScrollByte = 0;
+
+  // Laying out a chapter is O(document) and happens twice per redraw. Print the
+  // real number once per chapter rather than guessing at it.
+  const uint32_t t0 = micros();
+  const uint32_t laid = pocketx::wrapScan(kFont, gDoc->text(), kTextWidth,
+                                          [](void*, uint32_t, pocketx::Line) {}, nullptr);
+  Serial.printf("[layout] %lu bytes -> %lu lines in %lu us\n", (unsigned long)gDoc->size(),
+                (unsigned long)laid, (unsigned long)(micros() - t0));
   // A whole new page of text: without a full flash the previous chapter stays
   // legible underneath it, which is exactly what the ghosting looked like.
   gForceFullRefresh = true;
@@ -820,8 +879,12 @@ void loop() {
           ctrl ? gDoc->moveWordRight(shift) : gDoc->moveRight(shift); changed = true; break;
         case freeink::SpecialKey::Up:        moveCursorVertically(-1, shift); changed = true; break;
         case freeink::SpecialKey::Down:      moveCursorVertically(+1, shift); changed = true; break;
-        case freeink::SpecialKey::Home:      gDoc->moveToLineStart(shift); changed = true; break;
-        case freeink::SpecialKey::End:       gDoc->moveToLineEnd(shift);   changed = true; break;
+        // With Ctrl these jump to the ends of the CHAPTER. Without it, a
+        // 700-line chapter can only be crossed by holding an arrow key.
+        case freeink::SpecialKey::Home:
+          ctrl ? gDoc->moveToStart(shift) : gDoc->moveToLineStart(shift); changed = true; break;
+        case freeink::SpecialKey::End:
+          ctrl ? gDoc->moveToEnd(shift) : gDoc->moveToLineEnd(shift);     changed = true; break;
         // Page keys move between chapters -- the navigation a book needs more
         // than paging within one chapter, which the arrows already cover.
         case freeink::SpecialKey::PageUp:

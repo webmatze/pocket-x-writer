@@ -74,6 +74,7 @@ full evidence.
 | `Ctrl+A` / `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | select all, copy, cut, paste |
 | `Shift`+arrows | select · with `Ctrl`: by word |
 | `Ctrl`+`←`/`→` | move by word |
+| `Ctrl+Home` / `Ctrl+End` | jump to the start / end of the chapter |
 | `Ctrl+Backspace` | delete previous word |
 | `PageUp` / `PageDown` | previous / next chapter |
 | `Ctrl+N` | new chapter |

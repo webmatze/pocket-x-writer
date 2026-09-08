@@ -77,12 +77,27 @@ struct Line {
   uint32_t end = 0;   // excludes the trailing space or newline
 };
 
-// Break UTF-8 text into lines that fit `maxWidth` pixels.
+// Break UTF-8 text into lines that fit `maxWidth` pixels, handing each one to
+// `fn` in order, and return the total number of lines.
 //
 // Breaks at spaces where it can and mid-word only when a single word is wider
 // than the line, so a long URL cannot push text off the page. An explicit '\n'
-// always starts a new line. Writes at most `maxLines` and returns how many were
-// produced.
+// always starts a new line. Empty text still yields one (empty) line.
+//
+// Streaming rather than filling an array is the point: the caller keeps only
+// the handful of lines it is about to draw, so a chapter of any length lays out
+// in constant memory. A fixed array here was a silent ceiling -- past it, text
+// simply stopped being laid out, drawn, or reachable by the cursor.
+//
+// The full scan costs O(document) per call, which is deliberate. It is the same
+// trade the document buffer makes: measured against a ~550 ms panel refresh,
+// walking a chapter's glyph widths is not the bottleneck, and it buys a layout
+// with no special cases and no cache to invalidate.
+using LineSink = void (*)(void* ctx, uint32_t index, Line line);
+uint32_t wrapScan(const Font& font, const char* utf8, uint32_t maxWidth, LineSink fn, void* ctx);
+
+// Convenience wrapper: collect the first `maxLines` lines into `out` and return
+// how many were written. The layout itself is never truncated.
 uint16_t wrapText(const Font& font, const char* utf8, uint32_t maxWidth, Line* out, uint16_t maxLines);
 
 }  // namespace pocketx

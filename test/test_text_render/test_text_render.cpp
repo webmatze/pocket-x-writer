@@ -1,5 +1,6 @@
 #include <unity.h>
 #include <string.h>
+#include <string>
 #include "core/text_render.h"
 #include "fonts/NotoSans261bpp.h"
 
@@ -277,6 +278,109 @@ void test_diff_of_a_single_line_stays_small() {
   TEST_ASSERT_TRUE_MESSAGE(d.h < 40, "one line of change reported as many rows");
 }
 
+// --- wrapScan: the layout has no line ceiling -------------------------------
+//
+// A fixed array used to cap the layout of the WHOLE document at 32 lines, so
+// past roughly 270 words a chapter stopped being laid out at all. These pin
+// down that the scan covers every byte, however long the text is.
+
+namespace {
+
+std::string longProse(size_t bytes) {
+  std::string t;
+  while (t.size() < bytes)
+    t += "Der Hahn kraehte lange bevor irgendjemand im Haus wach sein wollte. ";
+  return t;
+}
+
+struct Counter {
+  uint32_t lines = 0;
+  uint32_t lastEnd = 0;
+};
+
+void countSink(void* p, uint32_t, Line l) {
+  auto* c = static_cast<Counter*>(p);
+  ++c->lines;
+  c->lastEnd = l.end;
+}
+
+struct Window {
+  uint32_t first;
+  uint32_t want;
+  Line got[8];
+  uint32_t stored = 0;
+};
+
+void windowSink(void* p, uint32_t idx, Line l) {
+  auto* w = static_cast<Window*>(p);
+  if (idx >= w->first && w->stored < w->want) w->got[w->stored++] = l;
+}
+
+// The scroll position is kept as a BYTE offset, not a line number, so an edit
+// elsewhere cannot silently move the viewport. This resolves such an offset
+// back to a line -- the same step redraw() performs.
+struct Anchor {
+  uint32_t byte;
+  uint32_t line = 0;
+  uint32_t lineBegin = 0;
+};
+
+void anchorSink(void* p, uint32_t idx, Line l) {
+  auto* a = static_cast<Anchor*>(p);
+  if (l.begin <= a->byte) { a->line = idx; a->lineBegin = l.begin; }
+}
+
+}  // namespace
+
+void test_wrap_scan_lays_out_far_past_the_old_ceiling() {
+  const std::string t = longProse(8000);
+  Counter c;
+  const uint32_t total = wrapScan(font, t.c_str(), 400, countSink, &c);
+
+  TEST_ASSERT_EQUAL_UINT32(total, c.lines);
+  TEST_ASSERT_TRUE(total > 32);              // the old array size
+  // Every byte is accounted for: the last line reaches the end of the text.
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)t.size(), c.lastEnd);
+}
+
+void test_wrap_scan_window_matches_the_full_layout() {
+  const std::string t = longProse(4000);
+  static Line all[512];
+  const uint16_t n = wrapText(font, t.c_str(), 400, all, 512);
+  TEST_ASSERT_TRUE(n > 40);
+
+  Window w{30, 5};
+  wrapScan(font, t.c_str(), 400, windowSink, &w);
+
+  TEST_ASSERT_EQUAL_UINT32(5, w.stored);
+  for (uint32_t i = 0; i < w.stored; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(all[30 + i].begin, w.got[i].begin);
+    TEST_ASSERT_EQUAL_UINT32(all[30 + i].end, w.got[i].end);
+  }
+}
+
+void test_wrap_scan_of_empty_text_is_one_line() {
+  Counter c;
+  const uint32_t total = wrapScan(font, "", 400, countSink, &c);
+  TEST_ASSERT_EQUAL_UINT32(1, total);
+  TEST_ASSERT_EQUAL_UINT32(1, c.lines);
+}
+
+void test_byte_anchor_survives_an_edit_below_it() {
+  std::string t = longProse(4000);
+  Anchor before{2000};
+  wrapScan(font, t.c_str(), 400, anchorSink, &before);
+  TEST_ASSERT_TRUE(before.line > 0);
+
+  // Append well past the anchor: the anchored line must not move.
+  t += "\nEin ganz neuer Absatz, weit hinter dem Anker.";
+  Anchor after{2000};
+  wrapScan(font, t.c_str(), 400, anchorSink, &after);
+
+  TEST_ASSERT_EQUAL_UINT32(before.line, after.line);
+  TEST_ASSERT_EQUAL_UINT32(before.lineBegin, after.lineBegin);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_utf8_decodes_ascii_and_multibyte);
@@ -296,6 +400,10 @@ int main(int, char**) {
   RUN_TEST(test_wrap_breaks_inside_an_overlong_word);
   RUN_TEST(test_wrap_never_exceeds_the_width);
   RUN_TEST(test_wrap_handles_umlauts_in_measurement);
+  RUN_TEST(test_wrap_scan_lays_out_far_past_the_old_ceiling);
+  RUN_TEST(test_wrap_scan_window_matches_the_full_layout);
+  RUN_TEST(test_wrap_scan_of_empty_text_is_one_line);
+  RUN_TEST(test_byte_anchor_survives_an_edit_below_it);
   RUN_TEST(test_invert_flips_pixels_and_is_its_own_inverse);
   RUN_TEST(test_invert_off_canvas_is_safe);
   RUN_TEST(test_diff_of_identical_canvases_is_empty);

@@ -174,10 +174,10 @@ Rect drawText(const Canvas& c, const Font& font, int32_t x, int32_t baselineY, c
 
 namespace pocketx {
 
-uint16_t wrapText(const Font& font, const char* utf8, uint32_t maxWidth, Line* out, uint16_t maxLines) {
-  if (!utf8 || !out || !maxLines || maxWidth == 0) return 0;
+uint32_t wrapScan(const Font& font, const char* utf8, uint32_t maxWidth, LineSink fn, void* ctx) {
+  if (!utf8 || !fn || maxWidth == 0) return 0;
 
-  uint16_t count = 0;
+  uint32_t count = 0;
   uint32_t lineStart = 0;      // byte offset where the current line begins
   uint32_t width = 0;          // pixels used so far on this line
   uint32_t lastSpace = UINT32_MAX;   // byte offset of the last space seen
@@ -185,13 +185,13 @@ uint16_t wrapText(const Font& font, const char* utf8, uint32_t maxWidth, Line* o
   uint32_t i = 0;
 
   auto emit = [&](uint32_t end, uint32_t nextStart) {
-    out[count++] = Line{lineStart, end};
+    fn(ctx, count++, Line{lineStart, end});
     lineStart = nextStart;
     width = 0;
     lastSpace = UINT32_MAX;
   };
 
-  while (utf8[i] && count < maxLines) {
+  while (utf8[i]) {
     uint32_t cp = 0;
     const uint8_t len = utf8Next(utf8 + i, &cp);
 
@@ -228,8 +228,27 @@ uint16_t wrapText(const Font& font, const char* utf8, uint32_t maxWidth, Line* o
     i += len;
   }
 
-  if (count < maxLines && (i > lineStart || count == 0)) out[count++] = Line{lineStart, i};
+  // The trailing partial line, and the single empty line an empty document has.
+  if (i > lineStart || count == 0) emit(i, i);
   return count;
+}
+
+namespace {
+struct Collector {
+  Line* out;
+  uint16_t max;
+  uint16_t n;
+};
+}  // namespace
+
+uint16_t wrapText(const Font& font, const char* utf8, uint32_t maxWidth, Line* out, uint16_t maxLines) {
+  if (!utf8 || !out || !maxLines || maxWidth == 0) return 0;
+  Collector c{out, maxLines, 0};
+  wrapScan(font, utf8, maxWidth, [](void* p, uint32_t, Line l) {
+    auto* col = static_cast<Collector*>(p);
+    if (col->n < col->max) col->out[col->n++] = l;
+  }, &c);
+  return c.n;
 }
 
 }  // namespace pocketx
