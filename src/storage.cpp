@@ -5,6 +5,8 @@
 
 #include <string.h>
 
+#include <Rtc.h>
+
 #include "core/project.h"
 #include "core/slug.h"
 
@@ -13,6 +15,31 @@ namespace {
 constexpr const char* kDir = "/notes";
 constexpr uint32_t kChunk = 512;
 }  // namespace
+
+namespace {
+
+freeink::Rtc* g_clock = nullptr;
+
+// SdFat asks for the current time whenever it creates or updates a file.
+void sdDateTime(uint16_t* date, uint16_t* time) {
+  freeink::Rtc::DateTime t;
+  if (!g_clock || !g_clock->now(t)) return;   // leave SdFat's default alone
+  *date = FS_DATE(t.year, t.month, t.day);
+  *time = FS_TIME(t.hour, t.minute, t.second);
+}
+
+}  // namespace
+
+void Storage::useRtcForTimestamps() {
+  static freeink::Rtc clock;
+  if (!clock.begin()) {
+    Serial.println("[sd] no RTC: file timestamps stay at the FAT epoch");
+    return;
+  }
+  g_clock = &clock;
+  FsDateTime::setCallback(sdDateTime);
+  Serial.println("[sd] file timestamps now come from the RTC");
+}
 
 void Storage::pathFor(const char* title, char* out, uint32_t outSize, const char* ext) {
   char slug[48];

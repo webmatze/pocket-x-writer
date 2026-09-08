@@ -25,6 +25,13 @@ struct Chapter {
 
 class Storage {
  public:
+  // Hand SdFat a clock. Without one every file is stamped with the FAT epoch,
+  // which is why chapters showed up on the Mac dated 2025-12-31 -- useless for
+  // sorting by when they were written, and the prerequisite for any per-day
+  // writing statistics later. Safe to call when no RTC is present: the callback
+  // simply is not installed.
+  static void useRtcForTimestamps();
+
   static constexpr uint16_t kMaxChapters = 64;
 
   bool begin();

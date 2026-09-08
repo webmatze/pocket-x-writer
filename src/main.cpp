@@ -17,6 +17,11 @@
 #include <BleKeyboardHost.h>
 #include <BoardConfig.h>
 #include <SDCardManager.h>
+#include <BatteryMonitor.h>
+#include <FrontlightManager.h>
+#include <PowerManager.h>
+#include <Preferences.h>
+#include <Rtc.h>
 #include <UsbMassStorage.h>
 #include <EInkDisplay.h>
 #include <XteinkDetect.h>
@@ -34,8 +39,29 @@ namespace {
 const auto& kPins = BoardConfig::ACTIVE.display;
 EInkDisplay display(kPins.sclk, kPins.mosi, kPins.cs, kPins.dc, kPins.rst, kPins.busy);
 
-constexpr int kSwitchButton = 7;
+constexpr int kSwitchButton = 7;     // Right nav: hold 2 s to boot the other slot
+// Left nav. Also the boot strap, which is fine for a button as long as it is not
+// held during reset -- so it gets a short press, never a hold.
+constexpr int kLightButton = 0;
 constexpr uint32_t kHoldMs = 2000;
+
+// Writing in the dark is the one thing the frontlight is for, so it sits on a
+// physical button rather than a keyboard chord: reaching for it in the dark
+// should not require finding a key combination.
+FrontlightManager gLight;
+constexpr uint8_t kLightSteps[] = {0, 12, 30, 60, 100};
+uint8_t gLightStep = 0;
+
+BatteryMonitor gBattery(BoardConfig::ACTIVE.batteryAdc,
+                        BoardConfig::ACTIVE.batteryDividerMultiplier,
+                        BoardConfig::ACTIVE.batteryChargeStatus);
+freeink::Rtc gRtc;
+Preferences gPrefs;
+
+// Sleep after a long idle. A writer who walks away should not come back to a
+// flat battery, and waking is a chip reset that reloads the chapter from SD --
+// which is safe precisely because saving happens first.
+constexpr uint32_t kSleepAfterMs = 15UL * 60UL * 1000UL;
 
 // Page layout. 800x480 with a 26 px font (yAdvance 36) leaves 12 body lines
 // under a status strip.
@@ -138,6 +164,8 @@ uint32_t gClipboardLen = 0;
 // that a flat battery costs a sentence rather than a session.
 constexpr uint32_t kAutosaveIdleMs = 8000;
 uint32_t gLastEditAt = 0;
+// Any interaction, not just edits: reading a page is being present too.
+uint32_t gLastActivityAt = 0;
 uint32_t gLastSaveAt = 0;
 bool gSaveFailed = false;
 uint16_t gScrollLine = 0;   // first wrapped line drawn
@@ -355,6 +383,43 @@ void pollUsbTransfer() {
   }
 }
 
+void applyLight() {
+  gLight.setBrightness(kLightSteps[gLightStep]);
+  gPrefs.putUChar("light", gLightStep);
+  Serial.printf("[light] %u%%\n", kLightSteps[gLightStep]);
+}
+
+void pollLightButton() {
+  static bool wasDown = false;
+  static uint32_t downAt = 0;
+  const bool down = digitalRead(kLightButton) == LOW;
+  const uint32_t now = millis();
+  if (down && !wasDown) {
+    downAt = now;
+  } else if (!down && wasDown && now - downAt > 30) {   // debounce
+    gLightStep = (uint8_t)((gLightStep + 1) % (sizeof(kLightSteps) / sizeof(kLightSteps[0])));
+    applyLight();
+  }
+  wasDown = down;
+}
+
+// Save, tell the writer what happened, then sleep. Order matters: the screen
+// holds its image without power, so the message stays readable while asleep.
+void sleepNow() {
+  saveCurrentChapter();
+  uint8_t* fb = display.getFrameBuffer();
+  const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
+  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+  pocketx::drawText(canvas, kFont, kMargin, 160, "Schl\xC3\xA4ft.");
+  pocketx::drawText(canvas, kFont, kMargin, 210, "Power-Taste weckt das Ger\xC3\xA4t.");
+  pocketx::drawText(canvas, kFont, kMargin, 260, "Alles gespeichert.");
+  display.displayBuffer(EInkDisplay::FULL_REFRESH);
+
+  gLight.off();
+  freeink::PowerManager::powerDownRailsForSleep();
+  freeink::PowerManager::deepSleepUntilPowerButton();   // does not return
+}
+
 void bootOtherSlot() {
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
   if (!other) return;
@@ -485,6 +550,19 @@ void pollSerialCommands() {
         ble.connect(d.addr);
         break;
       }
+      case 't': {
+        // t YYYY-MM-DD HH:MM:SS -- the device has no network, so the Mac sets it.
+        freeink::Rtc::DateTime t{};
+        int y, mo, d, h, mi, sec;
+        if (sscanf(line + 1, " %d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &sec) == 6) {
+          t.year = (uint16_t)y; t.month = (uint8_t)mo; t.day = (uint8_t)d;
+          t.hour = (uint8_t)h; t.minute = (uint8_t)mi; t.second = (uint8_t)sec;
+          Serial.println(gRtc.set(t) ? "[rtc] set" : "[rtc] set failed");
+        } else {
+          Serial.println("[rtc] usage: t YYYY-MM-DD HH:MM:SS");
+        }
+        break;
+      }
       case 'p':
         Serial.printf("[ble] %u bonded:\n", ble.pairedCount());
         for (uint8_t i = 0; i < ble.pairedCount(); ++i)
@@ -503,6 +581,7 @@ void pollSerialCommands() {
       default:
         Serial.println("[ble] s=scan  h=hunt(90s)  l=list  c<n>=connect  a<addr>=connect by address");
         Serial.println("[ble] p=pairings  f=forget all  d=disconnect");
+        Serial.println("[dev] t YYYY-MM-DD HH:MM:SS = set the clock");
     }
   }
 }
@@ -552,6 +631,7 @@ void setup() {
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
 
+  pocketx::Storage::useRtcForTimestamps();
   if (gStorage.begin() && gStorage.openBook(kBookTitle)) {
     gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
     if (gChapterCount == 0) {
@@ -568,6 +648,22 @@ void setup() {
     }
     Serial.printf("[book] %u chapter(s)\n", gChapterCount);
   }
+
+  pinMode(kLightButton, INPUT_PULLUP);
+  gPrefs.begin("pocketx", false);
+  gLight.begin();
+  gLightStep = gPrefs.getUChar("light", 0);
+  if (gLightStep >= sizeof(kLightSteps) / sizeof(kLightSteps[0])) gLightStep = 0;
+  gLight.setBrightness(kLightSteps[gLightStep]);
+  if (gRtc.begin()) {
+    freeink::Rtc::DateTime t;
+    if (gRtc.now(t))
+      Serial.printf("[rtc] %04u-%02u-%02u %02u:%02u:%02u\n", t.year, t.month, t.day, t.hour,
+                    t.minute, t.second);
+  } else {
+    Serial.println("[rtc] not present");
+  }
+  gLastActivityAt = millis();
 
   freeink::applyXteinkDisplayController();
   display.begin();
@@ -599,6 +695,10 @@ void loop() {
   ble.poll();
   pollUsbTransfer();
   pollSwitchButton();
+  pollLightButton();
+
+  // Idle long enough to be gone rather than thinking.
+  if (!gUsbMode && gLastActivityAt && millis() - gLastActivityAt >= kSleepAfterMs) sleepNow();
   handleScanResults();
   pollHunt();
   pollSerialCommands();
@@ -703,6 +803,7 @@ void loop() {
     if (changed) {
       gDirty = true;
       gLastEditAt = millis();
+      gLastActivityAt = gLastEditAt;
       if (!gPendingSince) gPendingSince = millis();
     }
   }
@@ -726,9 +827,14 @@ void loop() {
                                                    : "keine SD";
       const uint32_t words = pocketx::countWords(gDoc->text());
       const uint32_t today = words > gWordsAtOpen ? words - gWordsAtOpen : 0;
-      snprintf(gStatusText, sizeof(gStatusText), "Kap. %u/%u  %lu Worte  Ziel %u%%  %s",
+      uint16_t batt = 0;
+      char battText[16] = "";
+      if (gBattery.readPercentageChecked(batt))
+        snprintf(battText, sizeof(battText), "  %u%%%s", (unsigned)batt,
+                 gBattery.isCharging() ? "+" : "");
+      snprintf(gStatusText, sizeof(gStatusText), "Kap. %u/%u  %lu Worte  Ziel %u%%%s  %s",
                gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
-               (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
+               (unsigned)pocketx::goalPercent(today, kDailyGoal), battText, saveState);
       gStatusStale = false;
     }
     const char* status = gStatusText;
