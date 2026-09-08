@@ -104,8 +104,17 @@ void pollSwitchButton() {
 void listDevices() {
   auto& ble = freeink::BleKeyboardHost::getInstance();
   const uint8_t n = ble.deviceCount();
-  Serial.printf("[ble] %u device(s) seen:\n", n);
-  for (uint8_t i = 0; i < n; ++i) {
+  Serial.printf("[ble] %u device(s) seen, strongest first:\n", n);
+  // Sort by RSSI. A keyboard on the desk is 40 dB louder than the neighbours,
+  // so the one you want is at the top of the list.
+  uint8_t order[freeink::BleKeyboardHost::kMaxDiscovered];
+  for (uint8_t i = 0; i < n; ++i) order[i] = i;
+  for (uint8_t i = 1; i < n; ++i)
+    for (uint8_t j = i; j > 0 && ble.device(order[j]).rssi > ble.device(order[j - 1]).rssi; --j) {
+      const uint8_t t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+    }
+  for (uint8_t k = 0; k < n; ++k) {
+    const uint8_t i = order[k];
     const auto& d = ble.device(i);
     Serial.printf("  %2u %-24s %-18s rssi=%4d %s%s\n", i, d.name, d.addr, d.rssi,
                   d.hid ? "HID " : "    ", d.connectable ? "" : "(not connectable)");
