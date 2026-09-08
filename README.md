@@ -88,7 +88,8 @@ switch on the keyboard.
 |---|---|
 | **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
 | **Right** (hold 2 s) | reboot into the other firmware slot |
-| **Power** | wake from sleep |
+| **Power** (short press) | sleep now — saves first, then shows a sleep screen |
+| **Power** (while asleep) | wake |
 
 ---
 

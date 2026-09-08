@@ -43,7 +43,13 @@ constexpr int kSwitchButton = 7;     // Right nav: hold 2 s to boot the other sl
 // Left nav. Also the boot strap, which is fine for a button as long as it is not
 // held during reset -- so it gets a short press, never a hold.
 constexpr int kLightButton = 0;
+// Power key, GPIO3 active-LOW (BoardConfig's buttons.power for this profile).
+// PowerManager uses the same pin as the deep-sleep wake source.
+constexpr int kPowerButton = 3;
 constexpr uint32_t kHoldMs = 2000;
+// Long enough to reject a brush against the key, short enough that the sleep
+// screen appears while the finger is still on it.
+constexpr uint32_t kPowerPressMs = 80;
 
 // Writing in the dark is the one thing the frontlight is for, so it sits on a
 // physical button rather than a keyboard chord: reaching for it in the dark
@@ -438,6 +444,38 @@ void pollSwitchButton() {
   else if (now - downSince >= kHoldMs) { downSince = 0; bootOtherSlot(); }
 }
 
+// Power key: sleep on a press, the e-reader convention, so the sleep screen is
+// reachable on purpose instead of only after fifteen idle minutes.
+//
+// It acts while the key is still DOWN rather than on release. Waking is itself a
+// power press, so a release-triggered version would save nothing if the writer
+// keeps holding, and a long hold is exactly when the hardware may cut the rail
+// out from under us -- saving first is the whole point.
+//
+// `armed` is why a wake press does not bounce straight back into sleep: setup()
+// runs while the finger is still down, so the key must be seen released once
+// before a press counts.
+void pollPowerButton() {
+  static bool armed = false;
+  static uint32_t downSince = 0;
+
+  // Never sleep while the card belongs to the host: sleepNow() saves first, and
+  // that write would race the Mac.
+  if (gUsbMode) { downSince = 0; return; }
+
+  if (digitalRead(kPowerButton) != LOW) {   // released
+    armed = true;
+    downSince = 0;
+    return;
+  }
+  if (!armed) return;                       // still the press that woke us
+  const uint32_t now = millis();
+  if (downSince == 0) { downSince = now; return; }
+  if (now - downSince < kPowerPressMs) return;
+  Serial.println("[power] power key -> sleep");
+  sleepNow();                               // does not return
+}
+
 void listDevices() {
   auto& ble = freeink::BleKeyboardHost::getInstance();
   const uint8_t n = ble.deviceCount();
@@ -657,6 +695,7 @@ void setup() {
   }
 
   pinMode(kLightButton, INPUT_PULLUP);
+  pinMode(kPowerButton, INPUT_PULLUP);
   gPrefs.begin("pocketx", false);
   gLight.begin();
   gLightStep = gPrefs.getUChar("light", 0);
@@ -703,6 +742,7 @@ void loop() {
   pollUsbTransfer();
   pollSwitchButton();
   pollLightButton();
+  pollPowerButton();
 
   // Idle long enough to be gone rather than thinking.
   if (!gUsbMode && gLastActivityAt && millis() - gLastActivityAt >= kSleepAfterMs) sleepNow();
