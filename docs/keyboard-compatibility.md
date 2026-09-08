@@ -32,13 +32,12 @@ the macOS check below.
 
 ## The Keychron K3 (this unit) does NOT work
 
-Tested on hardware, 2026-09-08. Three independent findings, all pointing the
-same way:
+Tested on hardware. Three independent findings, all pointing the same way:
 
 | evidence | result |
 |---|---|
 | macOS System Report | `Dienste: 0x800020 < HID ACL >` — **ACL is a Classic link**. The Mac's own controller lists `GATT` for its LE support; the K3 shows none. |
-| BLE scan, 45 s continuous, keyboard in pairing mode | `DC:2C:26:26:B4:4F` **never appeared in a single advertisement** |
+| BLE scan, 45 s continuous, keyboard in pairing mode | its address **never appeared in a single advertisement** |
 | direct BLE connect to that address (both address types) | `connect timed out after 15s` |
 
 Crucially, the same scan that missed the keyboard **did** flag a neighbour's

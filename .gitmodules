@@ -1,4 +1,4 @@
 [submodule "vendor/freeink-sdk"]
 	path = vendor/freeink-sdk
-	url = https://github.com/Free-Ink/freeink-sdk.git
-	branch = main
+	url = https://github.com/webmatze/freeink-sdk.git
+	branch = uc8279x4-display-window

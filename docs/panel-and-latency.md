@@ -2,7 +2,7 @@
 
 ## The panel: UC8279 (X4 variant)
 
-Determined on hardware (MAC `b8:1f:3f:d5:fa:50`). At boot,
+Determined on hardware. At boot,
 `freeink::applyXteinkDisplayController()` probes the live display bus and
 **promotes** the driver away from the profile default (SSD1677). The driver that
 actually runs identifies itself in its own busy-wait tags:
