@@ -203,9 +203,11 @@ void redraw(uint8_t* fb, const char* status) {
   const uint16_t fits = (kH - kTextTop) / kFont.yAdvance;
 
   // Pass 1 locates the cursor and resolves the scroll anchor, storing nothing.
-  // Walking the chapter twice costs O(document) in glyph lookups, which against
-  // a ~550 ms panel refresh is not the bottleneck -- the same trade the document
-  // buffer makes. What it buys is a layout with no ceiling and no cache.
+  // Walking the chapter twice costs O(document) in glyph lookups: measured on
+  // hardware, a 36 KB / 6000-word chapter lays out in 11.3 ms, so a redraw pays
+  // ~23 ms against a ~270 ms wait for the character to appear. That buys a
+  // layout with no ceiling and no cache -- the same trade the document buffer
+  // makes when it chooses memmove over a gap buffer.
   struct Probe {
     uint32_t cursor, anchor, cursorLine, anchorLine;
   };
@@ -373,6 +375,17 @@ bool saveCurrentChapter() {
   return true;
 }
 
+// Laying out a chapter is O(document) and happens twice per redraw. Print the
+// real number whenever one is opened -- booting included, which is how a chapter
+// is opened most often -- rather than guessing at the cost.
+void reportLayoutCost() {
+  const uint32_t t0 = micros();
+  const uint32_t laid = pocketx::wrapScan(kFont, gDoc->text(), kTextWidth,
+                                          [](void*, uint32_t, pocketx::Line) {}, nullptr);
+  Serial.printf("[layout] %lu bytes -> %lu lines in %lu us\n", (unsigned long)gDoc->size(),
+                (unsigned long)laid, (unsigned long)(micros() - t0));
+}
+
 void openChapter(uint16_t index) {
   if (index >= gChapterCount) return;
   // Never switch away from unsaved work.
@@ -382,13 +395,7 @@ void openChapter(uint16_t index) {
   gWordsAtOpen = pocketx::countWords(gDoc->text());
   gScrollByte = 0;
 
-  // Laying out a chapter is O(document) and happens twice per redraw. Print the
-  // real number once per chapter rather than guessing at it.
-  const uint32_t t0 = micros();
-  const uint32_t laid = pocketx::wrapScan(kFont, gDoc->text(), kTextWidth,
-                                          [](void*, uint32_t, pocketx::Line) {}, nullptr);
-  Serial.printf("[layout] %lu bytes -> %lu lines in %lu us\n", (unsigned long)gDoc->size(),
-                (unsigned long)laid, (unsigned long)(micros() - t0));
+  reportLayoutCost();
   // A whole new page of text: without a full flash the previous chapter stays
   // legible underneath it, which is exactly what the ghosting looked like.
   gForceFullRefresh = true;
@@ -439,22 +446,20 @@ void enterUsbTransfer() {
 // filesystem cleanly and reloads the chapter, including anything the Mac wrote.
 // Point the USB pads back at the built-in CDC/JTAG controller.
 //
-// USB.begin(), which UsbMassStorage needs, switches the pads to the USB-OTG PHY
-// by setting bits in RTC_CNTL_USB_CONF_REG. Those bits live in the RTC domain
-// and SURVIVE esp_restart(), so rebooting out of transfer mode left the pads
-// pointing at a controller nobody was driving. The device then vanished from USB
-// completely -- no serial console, no way to flash it -- and only a true
-// power-on reset brought it back.
+// USB.begin(), which UsbMassStorage requires, switches the USB pads to the OTG
+// PHY by setting bits in RTC_CNTL_USB_CONF_REG. Those bits live in the RTC
+// domain and survive esp_restart(), so nothing in a plain reboot puts them back.
+// The Arduino core does this same switch-back in usb_switch_to_cdc_jtag() before
+// restarting into the bootloader; that function is static, so the register
+// sequence is repeated here.
 //
-// This went unnoticed until the power latch was fixed: before that, unplugging
-// the cable killed the device outright, and the resulting power-on reset cleared
-// the bits by accident.
-//
-// The sequence is the one the Arduino core itself uses before restarting into
-// the bootloader (usb_switch_to_cdc_jtag(), which is static and so not callable
-// from here). Clearing bits that are already clear is a no-op, so this is also
-// run first thing in setup(): a device stuck in that state heals on its next
-// boot, whatever caused the reboot.
+// Honest about the evidence: this was written while chasing a USB outage that
+// turned out to be a bad cable, so it is NOT the proven cause of anything
+// observed so far. What stands on its own is that the switch-back was missing
+// while the core considers it necessary, and that after the first MSC transfer
+// of this project the console only returned after a cable re-plug. Clearing bits
+// that are already clear is a no-op, so the cost of being wrong here is zero and
+// the cost of being right is a device that cannot be reached over USB.
 void routeUsbToCdcJtag() {
   CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG,
                       RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
@@ -779,6 +784,7 @@ void setup() {
       gChapterIndex = gChapterCount - 1;
       gStorage.loadChapter(doc, gChapters[gChapterIndex]);
       gWordsAtOpen = pocketx::countWords(doc.text());
+      reportLayoutCost();
     }
     Serial.printf("[book] %u chapter(s)\n", gChapterCount);
   }

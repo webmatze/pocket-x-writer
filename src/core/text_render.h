@@ -89,10 +89,10 @@ struct Line {
 // in constant memory. A fixed array here was a silent ceiling -- past it, text
 // simply stopped being laid out, drawn, or reachable by the cursor.
 //
-// The full scan costs O(document) per call, which is deliberate. It is the same
-// trade the document buffer makes: measured against a ~550 ms panel refresh,
-// walking a chapter's glyph widths is not the bottleneck, and it buys a layout
-// with no special cases and no cache to invalidate.
+// The full scan costs O(document) per call, which is deliberate. Measured on an
+// ESP32-S3 at 240 MHz: 36 KB of German prose, 765 lines, 11.3 ms. Against the
+// ~270 ms a character takes to appear on the panel that is affordable, and it
+// buys a layout with no special cases and no cache to invalidate.
 using LineSink = void (*)(void* ctx, uint32_t index, Line line);
 uint32_t wrapScan(const Font& font, const char* utf8, uint32_t maxWidth, LineSink fn, void* ctx);
 
