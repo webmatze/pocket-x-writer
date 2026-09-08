@@ -84,6 +84,19 @@ uint32_t gWordsAtOpen = 0;
 // suspends all filesystem use before begin() and reboots afterwards.
 freeink::UsbMassStorage gMsc;
 bool gUsbMode = false;
+
+// --- ghost management ------------------------------------------------------
+// FAST is the UC8279's DU partial: it transitions only changed pixels and
+// accumulates residual charge, which is what leaves shadows of earlier text and
+// why fresh letters start faint and darken over later passes. HALF is the
+// driver's charge SCRUB -- it seeds the old plane as the complement of the
+// target so EVERY pixel makes a transition, clearing that residue. It costs more
+// time, so it is spent where the writer will not feel it.
+constexpr uint8_t kMaxFastBeforeScrub = 10;   // hard cap while typing continuously
+constexpr uint32_t kIdleScrubMs = 2500;       // a pause is the free moment to scrub
+uint8_t gFastSinceScrub = 0;
+uint32_t gLastRefreshAt = 0;
+bool gForceFullRefresh = false;
 // Idle before an automatic save. Long enough not to save mid-word, short enough
 // that a flat battery costs a sentence rather than a session.
 constexpr uint32_t kAutosaveIdleMs = 8000;
@@ -143,9 +156,12 @@ void redraw(uint8_t* fb, const char* status) {
     y += kFont.yAdvance;
   }
 
-  // Caret, drawn where the cursor actually is rather than always at the end.
+  // Caret. A 2 px hairline was hard to find on this panel, and ghosting left
+  // several of them visible at once. A solid block with a baseline foot reads as
+  // one unmistakable mark even against residue.
   const int32_t caretY = kTextTop + (int32_t)(gCursorLine - gScrollLine) * kFont.yAdvance;
-  pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 4, 2, kFont.ascent}, true);
+  pocketx::fillRect(canvas, pocketx::Rect{gCursorX + 1, caretY + 3, 5, kFont.ascent - 1}, true);
+  pocketx::fillRect(canvas, pocketx::Rect{gCursorX - 2, caretY + kFont.ascent + 2, 11, 3}, true);
 }
 
 // Vertical movement is a view operation: it means "same x, one line up/down" in
@@ -205,6 +221,9 @@ void openChapter(uint16_t index) {
   gStorage.loadChapter(*gDoc, gChapters[index]);
   gWordsAtOpen = pocketx::countWords(gDoc->text());
   gScrollLine = 0;
+  // A whole new page of text: without a full flash the previous chapter stays
+  // legible underneath it, which is exactly what the ghosting looked like.
+  gForceFullRefresh = true;
   gDirty = true;
   if (!gPendingSince) gPendingSince = millis();
 }
@@ -550,7 +569,9 @@ void loop() {
     } else {
       switch (ev.special) {
         case freeink::SpecialKey::Enter:     changed = gDoc->insert("\n", 1); break;
-        case freeink::SpecialKey::Backspace: changed = gDoc->backspace(); break;
+        case freeink::SpecialKey::Backspace:
+          changed = ctrl ? gDoc->deleteWordBefore() : gDoc->backspace();
+          break;
         case freeink::SpecialKey::Delete:    changed = gDoc->deleteForward(); break;
         case freeink::SpecialKey::Left:
           ctrl ? gDoc->moveWordLeft() : gDoc->moveLeft();  changed = true; break;
@@ -608,9 +629,38 @@ void loop() {
              gChapterCount ? gChapterIndex + 1 : 0, gChapterCount, (unsigned long)words,
              (unsigned)pocketx::goalPercent(today, kDailyGoal), saveState);
     redraw(display.getFrameBuffer(), status);
-    display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
+
+    // Scrub when the writer has paused, or when too many partials have piled up
+    // to keep going. A full flash only for a whole-page change.
+    const bool idle = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
+    EInkDisplay::RefreshMode mode = EInkDisplay::FAST_REFRESH;
+    if (gForceFullRefresh) {
+      mode = EInkDisplay::FULL_REFRESH;
+      gForceFullRefresh = false;
+      gFastSinceScrub = 0;
+    } else if (gFastSinceScrub >= kMaxFastBeforeScrub || (idle && gFastSinceScrub > 0)) {
+      mode = EInkDisplay::HALF_REFRESH;
+      gFastSinceScrub = 0;
+    } else {
+      ++gFastSinceScrub;
+    }
+
+    // Only FAST overlaps: the scrubbing modes are worth waiting out, and they
+    // run at moments the writer is not mid-word anyway.
+    if (mode == EInkDisplay::FAST_REFRESH) display.displayBufferAsync(mode);
+    else display.displayBuffer(mode);
+
+    gLastRefreshAt = millis();
     gDirty = false;
     gPendingSince = 0;
+  }
+
+  // After a pause, clean the page once even when nothing else changed.
+  if (!gUsbMode && !gDirty && gFastSinceScrub > 0 && !display.refreshBusy() &&
+      gLastEditAt && millis() - gLastEditAt >= kIdleScrubMs) {
+    gFastSinceScrub = 0;
+    display.displayBuffer(EInkDisplay::HALF_REFRESH);
+    gLastRefreshAt = millis();
   }
 
   delay(5);

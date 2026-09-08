@@ -191,6 +191,22 @@ bool Document::backspace() {
   return true;
 }
 
+bool Document::deleteWordBefore() {
+  if (cursor_ == 0) return false;
+  uint32_t from = cursor_;
+  // Trailing whitespace belongs to the deletion: pressing Ctrl+Backspace after
+  // "Hallo " should remove "Hallo ", not just the space.
+  while (from > 0 && !isWordByte(buf_[prevBoundary(from)])) from = prevBoundary(from);
+  while (from > 0 && isWordByte(buf_[prevBoundary(from)])) from = prevBoundary(from);
+  if (from == cursor_) return false;
+
+  const uint32_t n = cursor_ - from;
+  recordErase(from, buf_ + from, n);
+  if (!rawErase(from, n)) return false;
+  cursor_ = from;
+  return true;
+}
+
 bool Document::deleteForward() {
   if (cursor_ >= len_) return false;
   const uint32_t to = nextBoundary(cursor_);

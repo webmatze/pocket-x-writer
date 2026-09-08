@@ -218,6 +218,49 @@ void test_dirty_flag_tracks_edits() {
   TEST_ASSERT_TRUE(d.dirty());
 }
 
+
+void test_ctrl_backspace_deletes_a_whole_word() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  TEST_ASSERT_TRUE(d.deleteWordBefore());
+  TEST_ASSERT_EQUAL_STRING("Hallo ", d.text());
+  TEST_ASSERT_TRUE(d.deleteWordBefore());
+  TEST_ASSERT_EQUAL_STRING("", d.text());
+}
+
+// One press should remove one word, not just the space that follows it.
+void test_ctrl_backspace_eats_trailing_space_with_the_word() {
+  Document d = makeDoc();
+  type(d, "eins zwei   ");
+  d.deleteWordBefore();
+  TEST_ASSERT_EQUAL_STRING("eins ", d.text());
+}
+
+void test_ctrl_backspace_keeps_umlauts_whole() {
+  Document d = makeDoc();
+  type(d, "Der Gr\xC3\xB6\xC3\x9F" "e");
+  d.deleteWordBefore();
+  TEST_ASSERT_EQUAL_STRING("Der ", d.text());
+}
+
+void test_ctrl_backspace_at_the_start_is_a_no_op() {
+  Document d = makeDoc();
+  type(d, "x");
+  d.moveToStart();
+  TEST_ASSERT_FALSE(d.deleteWordBefore());
+  TEST_ASSERT_EQUAL_STRING("x", d.text());
+}
+
+void test_ctrl_backspace_is_one_undo_step() {
+  Document d = makeDoc();
+  type(d, "Hallo Welt");
+  d.breakUndoGroup();
+  d.deleteWordBefore();
+  TEST_ASSERT_EQUAL_STRING("Hallo ", d.text());
+  TEST_ASSERT_TRUE(d.undo());
+  TEST_ASSERT_EQUAL_STRING("Hallo Welt", d.text());
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_starts_empty);
@@ -239,5 +282,10 @@ int main(int, char**) {
   RUN_TEST(test_undo_on_an_empty_history_is_a_no_op);
   RUN_TEST(test_document_without_undo_storage_still_edits);
   RUN_TEST(test_dirty_flag_tracks_edits);
+  RUN_TEST(test_ctrl_backspace_deletes_a_whole_word);
+  RUN_TEST(test_ctrl_backspace_eats_trailing_space_with_the_word);
+  RUN_TEST(test_ctrl_backspace_keeps_umlauts_whole);
+  RUN_TEST(test_ctrl_backspace_at_the_start_is_a_no_op);
+  RUN_TEST(test_ctrl_backspace_is_one_undo_step);
   return UNITY_END();
 }

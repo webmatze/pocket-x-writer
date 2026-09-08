@@ -68,6 +68,9 @@ class Document {
   bool insert(const char* utf8, uint32_t len);
   bool insert(const char* utf8);            // NUL-terminated
   bool backspace();                          // erase the character before the cursor
+  // Erase back to the start of the previous word (Ctrl+Backspace). Eats any
+  // whitespace first, then the word itself, so one press removes one word.
+  bool deleteWordBefore();
   bool deleteForward();                      // erase the character at the cursor
 
   // --- undo ----------------------------------------------------------------
