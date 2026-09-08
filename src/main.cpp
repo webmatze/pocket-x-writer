@@ -82,6 +82,81 @@ uint32_t timeBlocking(EInkDisplay::RefreshMode mode, uint8_t* fb, uint16_t seedL
   return millis() - t0;
 }
 
+// Does refresh cost scale with the number of gate lines driven? That is the
+// whole hypothesis behind implementing a window. Sweep heights and see.
+void measureWindowScaling(uint8_t* fb) {
+  Serial.println("-- windowed refresh, height sweep (x=0 w=800) --");
+  Serial.println("   rows |  ms | vs full panel");
+  const uint16_t heights[] = {32, 64, 128, 240, 480};
+  for (uint16_t h : heights) {
+    // Seed a settled baseline so the OLD plane is valid and the DU has a real
+    // diff to develop; without this the first window measures nothing.
+    renderFakePage(fb, 14);
+    display.displayBuffer(EInkDisplay::FAST_REFRESH);
+
+    // Dirty only the rows the window will cover.
+    for (uint16_t yy = 0; yy < h; ++yy)
+      for (uint16_t xb = 0; xb < kRowBytes; ++xb)
+        fb[(uint32_t)yy * kRowBytes + xb] = (yy / 8) % 2 ? 0x00 : 0xFF;
+
+    const uint32_t t0 = millis();
+    display.displayWindow(0, 0, kW, h);
+    const uint32_t ms = millis() - t0;
+    Serial.printf("   %4u | %3lu | %lu%%\n", h, (unsigned long)ms,
+                  (unsigned long)(ms * 100 / 554));
+  }
+  Serial.println();
+}
+
+// What a real editor does: never block on the panel. Accept keystrokes at a
+// human cadence, coalesce them into the buffer, and refresh only when the panel
+// is free. The number that matters is the WORST-CASE age of a character when it
+// finally becomes visible.
+void measureCoalescedTyping(uint8_t* fb, uint16_t lineY, uint16_t lineH, bool useWindow) {
+  renderFakePage(fb, 14);
+  display.displayBuffer(EInkDisplay::FAST_REFRESH);
+
+  constexpr uint16_t kKeys = 30;
+  constexpr uint32_t kCadenceMs = 200;   // 5 char/s, a brisk but human pace
+  uint32_t pressedAt[kKeys];
+  bool shown[kKeys];
+  for (uint16_t i = 0; i < kKeys; ++i) shown[i] = false;
+
+  uint32_t worstAge = 0, sumAge = 0;
+  uint16_t shownCount = 0, refreshes = 0;
+  uint16_t oldest = 0;
+
+  const uint32_t start = millis();
+  for (uint16_t i = 0; i < kKeys; ++i) {
+    while (millis() - start < (uint32_t)i * kCadenceMs) { /* wait for the "keypress" */ }
+    pressedAt[i] = millis();
+    typeOneChar(fb, i);
+
+    if (!display.refreshBusy()) {
+      if (useWindow) display.displayWindow(0, lineY, kW, lineH);
+      else display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
+      ++refreshes;
+      const uint32_t now = millis();
+      for (uint16_t j = oldest; j <= i; ++j) {
+        if (!shown[j]) { shown[j] = true; ++shownCount;
+          const uint32_t age = now - pressedAt[j];
+          worstAge = max(worstAge, age); sumAge += age; }
+      }
+      oldest = i;
+    }
+  }
+  display.waitRefreshComplete();
+  const uint32_t now = millis();
+  for (uint16_t j = 0; j < kKeys; ++j)
+    if (!shown[j]) { const uint32_t age = now - pressedAt[j];
+      worstAge = max(worstAge, age); sumAge += age; ++shownCount; }
+
+  Serial.printf("  %-14s refreshes=%u  chars/refresh=%.1f  age avg %lu ms / worst %lu ms\n",
+                useWindow ? "windowed:" : "whole-panel:", refreshes,
+                refreshes ? (float)kKeys / refreshes : 0.0f,
+                (unsigned long)(sumAge / kKeys), (unsigned long)worstAge);
+}
+
 void runBenchmark() {
   uint8_t* fb = display.getFrameBuffer();
   if (!fb) { Serial.println("[err] no framebuffer"); return; }
@@ -136,8 +211,18 @@ void runBenchmark() {
   Serial.printf("  char visible  : min %lu / avg %lu / max %lu ms\n",
                 (unsigned long)settle.lo, (unsigned long)settle.avg(), (unsigned long)settle.hi);
   Serial.println();
-  Serial.printf("  => sustained typing ceiling: ~%lu chars/sec\n",
+  Serial.printf("  => visible-feedback rate: ~%lu chars/sec (settle-bound, NOT the input ceiling)\n",
                 settle.avg() ? (unsigned long)(1000UL / settle.avg()) : 0UL);
+  Serial.println();
+
+  // --- 4. the hypothesis: does a window actually cost less? ---
+  measureWindowScaling(fb);
+
+  // --- 5. realistic editor behaviour, both strategies ---
+  Serial.println("-- coalesced typing at 5 char/s, 30 keystrokes --");
+  measureCoalescedTyping(fb, 8 + 6 * kLineHeight, 32, false);
+  measureCoalescedTyping(fb, 8 + 6 * kLineHeight, 32, true);
+  Serial.println();
   Serial.println("#################################################");
   Serial.println("Hold RIGHT 2s to boot the other slot.");
 }
