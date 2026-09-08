@@ -92,15 +92,29 @@ bool gUsbMode = false;
 // driver's charge SCRUB -- it seeds the old plane as the complement of the
 // target so EVERY pixel makes a transition, clearing that residue. It costs more
 // time, so it is spent where the writer will not feel it.
-// With damage tracking a keystroke only touches its own line, so residue builds
-// far more slowly than when every update repainted the whole page. The cap can
-// be much higher and the pause much longer, which is what makes the scrub rare.
-constexpr uint8_t kMaxFastBeforeScrub = 40;
-constexpr uint32_t kIdleScrubMs = 6000;
+// How urgently the page needs scrubbing depends on how much AREA was repainted
+// with partials, not how many partials there were. Typing a character and
+// clearing a full-page selection both count as one refresh, yet the second
+// leaves roughly as much residue as a hundred keystrokes -- which is why a fixed
+// pause felt far too long after selecting all and deselecting again.
+//
+// gResidue accumulates repainted area in percent of a full page. The pause
+// before scrubbing shrinks as it grows, so a heavy change is cleaned up almost
+// at once while ordinary typing is left alone.
+uint32_t gResidue = 0;
+constexpr uint32_t kResidueForceScrub = 300;   // three pages' worth: clean up regardless
+constexpr uint32_t kIdleScrubMsLow = 6000;     // after light typing
+constexpr uint32_t kIdleScrubMsMid = 2500;
+constexpr uint32_t kIdleScrubMsHigh = 1000;    // after a page-sized repaint
+
+uint32_t idleScrubDelay() {
+  if (gResidue >= 80) return kIdleScrubMsHigh;
+  if (gResidue >= 25) return kIdleScrubMsMid;
+  return kIdleScrubMsLow;
+}
 // Below this fraction of the page, refresh just the changed rectangle. Above it
 // the window costs the same as a full pass, so there is nothing to gain.
 constexpr uint32_t kWindowMaxRows = 200;
-uint8_t gFastSinceScrub = 0;
 // Previous frame, kept to diff against. Trusting a frame comparison rather than
 // hand-reported damage means a missed report cannot leave stale pixels behind.
 uint8_t* gPrevFrame = nullptr;
@@ -704,7 +718,7 @@ void loop() {
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (!gUsbMode && gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
-    const bool idleNow = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
+    const bool idleNow = gLastEditAt == 0 || millis() - gLastEditAt >= idleScrubDelay();
     if (gStatusStale || idleNow) {
       const char* saveState = gSaveFailed          ? "NICHT GESPEICHERT"
                               : gDoc->dirty()      ? "*"
@@ -738,26 +752,28 @@ void loop() {
     }
 
     {
-      const bool idle = gLastEditAt == 0 || millis() - gLastEditAt >= kIdleScrubMs;
+      const uint32_t area = ((uint32_t)damage.w * (uint32_t)damage.h * 100u) /
+                            ((uint32_t)kW * (uint32_t)kH);
+      const bool idle = gLastEditAt == 0 || millis() - gLastEditAt >= idleScrubDelay();
       if (gForceFullRefresh) {
         display.displayBuffer(EInkDisplay::FULL_REFRESH);
         gForceFullRefresh = false;
-        gFastSinceScrub = 0;
-      } else if (gFastSinceScrub >= kMaxFastBeforeScrub || (idle && gFastSinceScrub > 0)) {
+        gResidue = 0;
+      } else if (gResidue >= kResidueForceScrub || (idle && gResidue > 0)) {
         // The scrub has to cover the whole panel: residue sits wherever earlier
         // partials landed, not only where the last one did.
         display.displayBuffer(EInkDisplay::HALF_REFRESH);
-        gFastSinceScrub = 0;
+        gResidue = 0;
       } else if ((uint32_t)damage.h <= kWindowMaxRows) {
         // Confine the partial to the rows that changed. It costs the same time
         // as a full pass on this panel, but only this band collects residue --
         // which is what makes the scrub rare enough to stop being a nuisance.
         display.displayWindow((uint16_t)damage.x, (uint16_t)damage.y, (uint16_t)damage.w,
                               (uint16_t)damage.h);
-        ++gFastSinceScrub;
+        gResidue += area ? area : 1;   // never zero, or tiny edits would never trigger a scrub
       } else {
         display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
-        ++gFastSinceScrub;
+        gResidue += 100;               // a whole-panel partial dirties the whole panel
       }
     }
 
@@ -768,9 +784,9 @@ void loop() {
   }
 
   // After a pause, clean the page once even when nothing else changed.
-  if (!gUsbMode && !gDirty && gFastSinceScrub > 0 && !display.refreshBusy() &&
-      gLastEditAt && millis() - gLastEditAt >= kIdleScrubMs) {
-    gFastSinceScrub = 0;
+  if (!gUsbMode && !gDirty && gResidue > 0 && !display.refreshBusy() && gLastEditAt &&
+      millis() - gLastEditAt >= idleScrubDelay()) {
+    gResidue = 0;
     display.displayBuffer(EInkDisplay::HALF_REFRESH);
     gLastRefreshAt = millis();
   }
