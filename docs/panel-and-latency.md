@@ -81,10 +81,30 @@ our x/y/w/h and slicing the framebuffer rows to match, with
 `Ssd1677Driver::displayWindow()` as the reference for the byte-alignment rules
 (`x % 8 == 0`, `w % 8 == 0`) and bounds checks.
 
-**Expected payoff:** UC8279 partial refresh time scales with the number of gate
-lines driven. One 26 px text line is ~5.4% of 480 rows. Even allowing generous
-fixed overhead, that should move visible latency from ~554 ms into the tens of
-milliseconds — the difference between unusable and pleasant.
+### The payoff is a hypothesis, not a promise
 
-This is the pivotal engineering task for the project, and it is worth
-contributing back to the FreeInk SDK.
+The working assumption is that UC8279 partial refresh time scales with the
+number of gate lines driven, so a 26 px line (~5.4% of 480 rows) would cost far
+less than a full panel. **That is a plausible model of the hardware, not a
+measured fact.** Waveform time may have a large fixed component that a small
+window does not avoid.
+
+M3b tests exactly this: drive one 26-row window at a known Y with a solid test
+strip and measure. Everything else — alignment, edge cases, integration —
+follows only if that number is good.
+
+### Known risks in the implementation
+
+- **Gate offset.** A driver comment records the OEM sequence as
+  `PTIN -> PTL(full window, +120 gate offset)`. Panel gate line 0 is apparently
+  not framebuffer row 0 on this glass. A window's Y must carry the same
+  transform or it will refresh the wrong strip.
+- **Old-plane sync.** UC8279 partial mode diffs the old plane against the new
+  plane in controller RAM. This build is `EINK_DISPLAY_SINGLE_BUFFER_MODE=1`, so
+  the facade passes `prev = nullptr`. If a window uploads only the new plane for
+  its region, the old plane for that region must already be in sync, or the
+  diff runs against stale data and the region ghosts or does not update.
+
+If the PTL descriptor turns out to fight us, the fallback is coalescing plus a
+typewriter mode at the full-panel cost — which is what the existing X4 writing
+firmware ships.
