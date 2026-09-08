@@ -20,6 +20,8 @@
 #include <XteinkDetect.h>
 
 #include "core/de_keymap.h"
+#include "core/text_render.h"
+#include "fonts/NotoSans261bpp.h"
 
 namespace {
 
@@ -29,65 +31,86 @@ EInkDisplay display(kPins.sclk, kPins.mosi, kPins.cs, kPins.dc, kPins.rst, kPins
 constexpr int kSwitchButton = 7;
 constexpr uint32_t kHoldMs = 2000;
 
+// Page layout. 800x480 with a 26 px font (yAdvance 36) leaves 12 body lines
+// under a status strip.
 constexpr uint16_t kW = 800, kH = 480;
 constexpr uint16_t kRowBytes = kW / 8;
+constexpr int32_t kMargin = 24;
+constexpr int32_t kTextTop = 56;
+constexpr uint32_t kTextWidth = kW - 2 * kMargin;
+constexpr uint16_t kMaxLines = 32;
 
-// Typed-character grid: one block per character.
-constexpr uint16_t kCell = 16, kGap = 4, kMargin = 24, kTopBar = 64;
-constexpr uint16_t kCols = (kW - 2 * kMargin) / (kCell + kGap);
+const pocketx::Font& kFont = freeink::ui::kNotoSans261bppFont;
 
 pocketx::Dead gDead = pocketx::Dead::None;
-uint16_t gTyped = 0;
 uint32_t gPendingSince = 0;
 bool gDirty = false;
 bool gScanRequested = false;
 uint32_t gConnectStartedAt = 0;
-// Hunt mode: keep scanning and report devices the moment they appear, instead
-// of once at the end of a fixed window. A keyboard advertises in bursts and may
-// well be quiet during any single 8 s scan -- macOS finds it because its
-// settings panel listens continuously, so we do the same.
+// Hunt mode: keep scanning and report devices the moment they appear. A
+// keyboard advertises in bursts and can be quiet during any single short scan.
 bool gHunting = false;
 uint32_t gHuntUntil = 0;
 uint8_t gReported = 0;
 
-char gLine[512];
-uint16_t gLineLen = 0;
-
-void fillRect(uint8_t* fb, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool black) {
-  for (uint16_t yy = y; yy < y + h && yy < kH; ++yy) {
-    for (uint16_t xx = x; xx < x + w && xx < kW; ++xx) {
-      const uint32_t idx = (uint32_t)yy * kRowBytes + (xx >> 3);
-      const uint8_t bit = 0x80 >> (xx & 7);
-      if (black) fb[idx] &= ~bit;   // 0 = black
-      else fb[idx] |= bit;
-    }
-  }
-}
-
-void redraw(uint8_t* fb, bool connected) {
-  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
-  // Status bar: solid when connected, dashed while searching.
-  if (connected) {
-    fillRect(fb, kMargin, 24, kW - 2 * kMargin, 12, true);
-  } else {
-    for (uint16_t x = kMargin; x < kW - kMargin; x += 40)
-      fillRect(fb, x, 24, 20, 12, true);
-  }
-  for (uint16_t i = 0; i < gTyped && i < kCols * 20; ++i) {
-    const uint16_t c = i % kCols, r = i / kCols;
-    fillRect(fb, kMargin + c * (kCell + kGap), kTopBar + r * (kCell + kGap), kCell, kCell, true);
-  }
-}
-
-void flushLine() {
-  if (!gLineLen) return;
-  gLine[gLineLen] = 0;
-  Serial.printf("[text] %s\n", gLine);
-  gLineLen = 0;
-}
+// The document. A flat UTF-8 buffer is enough to prove the pipeline; the real
+// editor core (gap buffer, undo, cursor) is the next step.
+char gText[8192];
+uint32_t gTextLen = 0;
 
 void appendText(const char* s, uint8_t len) {
-  for (uint8_t i = 0; i < len && gLineLen < sizeof(gLine) - 1; ++i) gLine[gLineLen++] = s[i];
+  for (uint8_t i = 0; i < len && gTextLen < sizeof(gText) - 1; ++i) gText[gTextLen++] = s[i];
+  gText[gTextLen] = 0;
+}
+
+// Delete one CHARACTER, not one byte: chopping a byte off "ä" would leave a
+// broken UTF-8 sequence in the document.
+void backspaceChar() {
+  if (!gTextLen) return;
+  uint32_t i = gTextLen - 1;
+  while (i > 0 && (gText[i] & 0xC0) == 0x80) --i;   // step back over continuation bytes
+  gTextLen = i;
+  gText[gTextLen] = 0;
+}
+
+void redraw(uint8_t* fb, bool connected, const char* status) {
+  const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
+  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+
+  // Status strip.
+  pocketx::drawText(canvas, kFont, kMargin, 34, status);
+  pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
+
+  pocketx::Line lines[kMaxLines];
+  const uint16_t n = pocketx::wrapText(kFont, gText, kTextWidth, lines, kMaxLines);
+
+  // Show the tail of the document: a writer wants to see what they just typed.
+  const uint16_t fits = (kH - kTextTop) / kFont.yAdvance;
+  const uint16_t firstLine = n > fits ? n - fits : 0;
+
+  int32_t y = kTextTop + kFont.ascent;
+  char buf[256];
+  for (uint16_t i = firstLine; i < n; ++i) {
+    uint32_t len = lines[i].end - lines[i].begin;
+    if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
+    memcpy(buf, gText + lines[i].begin, len);
+    buf[len] = 0;
+    pocketx::drawText(canvas, kFont, kMargin, y, buf);
+    y += kFont.yAdvance;
+  }
+
+  // Caret: a filled block after the last line, so the page looks alive even
+  // between refreshes.
+  if (n) {
+    uint32_t len = lines[n - 1].end - lines[n - 1].begin;
+    if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
+    memcpy(buf, gText + lines[n - 1].begin, len);
+    buf[len] = 0;
+    const int32_t caretX = kMargin + (int32_t)pocketx::measureText(kFont, buf);
+    const int32_t caretY = kTextTop + (int32_t)(n - 1 - firstLine) * kFont.yAdvance;
+    pocketx::fillRect(canvas, pocketx::Rect{caretX + 2, caretY + 4, 2, kFont.ascent}, true);
+  }
+  (void)connected;
 }
 
 void bootOtherSlot() {
@@ -268,7 +291,7 @@ void setup() {
 
   freeink::applyXteinkDisplayController();
   display.begin();
-  redraw(display.getFrameBuffer(), false);
+  redraw(display.getFrameBuffer(), false, "PocketX Writer  Tastatur suchen...");
   display.displayBuffer(EInkDisplay::FULL_REFRESH);
 
   Serial.println("\n=== PocketX Writer :: M4 BLE keyboard ===");
@@ -314,14 +337,13 @@ void loop() {
   freeink::KeyEvent ev;
   while (ble.popKey(ev)) {
     if (ev.special == freeink::SpecialKey::Enter) {
-      flushLine();
-      Serial.println("[key] Enter");
+      appendText("\n", 1);
+      gDirty = true;
+      if (!gPendingSince) gPendingSince = millis();
       continue;
     }
     if (ev.special == freeink::SpecialKey::Backspace) {
-      if (gLineLen) --gLineLen;
-      if (gTyped) --gTyped;
-      Serial.println("[key] Backspace");
+      backspaceChar();
       gDirty = true;
       if (!gPendingSince) gPendingSince = millis();
       continue;
@@ -339,18 +361,20 @@ void loop() {
     if (txt.consumedAsDead) { Serial.println("[key] dead key armed"); continue; }
 
     appendText(txt.utf8, txt.len);
-    ++gTyped;
     gDirty = true;
     if (!gPendingSince) gPendingSince = millis();
     // Show what the SDK's US table would have produced, so a layout regression
     // is visible rather than silent.
-    Serial.printf("[key] usage=0x%02X mods=0x%02X -> \"%s\"  (sdk ascii: '%c')\n",
-                  ev.keycode, ev.mods, txt.utf8, ev.ch ? ev.ch : ' ');
+    Serial.printf("[key] 0x%02X/%02X -> \"%s\" (us:'%c')  doc=%lub\n", ev.keycode, ev.mods, txt.utf8,
+                  ev.ch ? ev.ch : ' ', (unsigned long)gTextLen);
   }
 
   // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
   if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
-    redraw(display.getFrameBuffer(), connected);
+    char status[64];
+    snprintf(status, sizeof(status), "PocketX Writer  %s  %lu Zeichen",
+             connected ? ble.connectedName() : "keine Tastatur", (unsigned long)gTextLen);
+    redraw(display.getFrameBuffer(), connected, status);
     display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
     gDirty = false;
     gPendingSince = 0;
