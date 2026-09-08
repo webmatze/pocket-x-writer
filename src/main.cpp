@@ -1,237 +1,93 @@
-// PocketX Writer — M3 typing-latency spike.
+// PocketX Writer — M4: BLE keyboard end to end.
 //
-// The one question that decides whether this product is worth building: how long
-// after a keystroke does the character actually appear on the panel?
+// Pairs with a BLE HID keyboard, translates HID usages through the German T1
+// layout (src/core/de_keymap.*, covered by native unit tests) and echoes the
+// text over serial. On screen each character appears as a block in a grid --
+// enough to see and feel the input path. Real glyph rendering needs a font
+// pipeline and belongs to M5.
 //
-// This unit carries a UC8179, whose driver does NOT implement a windowed
-// refresh -- displayWindow() falls through to a whole-panel Fast refresh (see
-// docs/panel-uc8179.md). So every number here is a FULL 800x480 repaint. That is
-// the honest baseline; a real window would only improve on it.
+// Screen updates follow the M3 result: never block on the panel, coalesce
+// keystrokes and refresh only when it is free.
 //
-// Escape hatch preserved: hold RIGHT for 2 s to boot back into the other slot.
+// Hold RIGHT for 2 s to boot the other OTA slot.
 
 #include <Arduino.h>
 #include <esp_ota_ops.h>
 
+#include <BleKeyboardHost.h>
 #include <BoardConfig.h>
 #include <EInkDisplay.h>
 #include <XteinkDetect.h>
 
+#include "core/de_keymap.h"
+
 namespace {
 
 const auto& kPins = BoardConfig::ACTIVE.display;
-EInkDisplay display(kPins.sclk, kPins.mosi, kPins.cs, kPins.dc, kPins.rst,
-                    kPins.busy);
+EInkDisplay display(kPins.sclk, kPins.mosi, kPins.cs, kPins.dc, kPins.rst, kPins.busy);
 
-constexpr int kSwitchButton = 7;   // Right nav, active-low (GPIO0 is a boot strap)
+constexpr int kSwitchButton = 7;
 constexpr uint32_t kHoldMs = 2000;
 
 constexpr uint16_t kW = 800, kH = 480;
-constexpr uint16_t kRowBytes = kW / 8;      // 100
-constexpr uint16_t kLineHeight = 26;        // plausible body-text leading
-constexpr uint16_t kCharW = 12;             // plausible advance width
+constexpr uint16_t kRowBytes = kW / 8;
 
-bool gPanelPromoted = false;
+// Typed-character grid: one block per character.
+constexpr uint16_t kCell = 16, kGap = 4, kMargin = 24, kTopBar = 64;
+constexpr uint16_t kCols = (kW - 2 * kMargin) / (kCell + kGap);
 
-inline void setByte(uint8_t* fb, uint16_t x, uint16_t y, uint8_t v) {
-  if (x >= kW || y >= kH) return;
-  fb[(uint32_t)y * kRowBytes + (x / 8)] = v;
-}
+pocketx::Dead gDead = pocketx::Dead::None;
+uint16_t gTyped = 0;
+uint32_t gPendingSince = 0;
+bool gDirty = false;
+bool gScanRequested = false;
+uint32_t gScanStartedAt = 0;
 
-// Paint something that looks like a page of prose, so the refresh has realistic
-// content to transition (an all-white panel is not a fair baseline: e-ink
-// transition cost depends on how many pixels actually change).
-void renderFakePage(uint8_t* fb, uint16_t lines) {
-  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);   // 0xFF = white
-  uint32_t seed = 12345;
-  for (uint16_t l = 0; l < lines; ++l) {
-    const uint16_t yTop = 8 + l * kLineHeight;
-    if (yTop + 16 >= kH) break;
-    uint16_t x = 8;
-    while (x < kW - 40) {
-      seed = seed * 1103515245u + 12345u;
-      const uint16_t wordLen = 2 + (seed >> 16) % 7;          // 2..8 chars
-      for (uint16_t c = 0; c < wordLen && x < kW - 40; ++c) {
-        for (uint16_t dy = 0; dy < 16; ++dy) {
-          // crude glyph body: two dark bytes per character cell
-          setByte(fb, x, yTop + dy, 0x00);
-        }
-        x += kCharW;
-      }
-      x += kCharW;                                            // word space
+char gLine[512];
+uint16_t gLineLen = 0;
+
+void fillRect(uint8_t* fb, uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool black) {
+  for (uint16_t yy = y; yy < y + h && yy < kH; ++yy) {
+    for (uint16_t xx = x; xx < x + w && xx < kW; ++xx) {
+      const uint32_t idx = (uint32_t)yy * kRowBytes + (xx >> 3);
+      const uint8_t bit = 0x80 >> (xx & 7);
+      if (black) fb[idx] &= ~bit;   // 0 = black
+      else fb[idx] |= bit;
     }
   }
 }
 
-// Change exactly one character cell — the "keystroke".
-void typeOneChar(uint8_t* fb, uint16_t index) {
-  const uint16_t line = 6;                       // somewhere mid-page
-  const uint16_t yTop = 8 + line * kLineHeight;
-  const uint16_t x = 8 + (index % 50) * kCharW;
-  for (uint16_t dy = 0; dy < 16; ++dy) setByte(fb, x, yTop + dy, 0x00);
-}
-
-struct Stats { uint32_t lo = UINT32_MAX, hi = 0; uint64_t sum = 0; uint16_t n = 0;
-  void add(uint32_t v) { lo = min(lo, v); hi = max(hi, v); sum += v; ++n; }
-  uint32_t avg() const { return n ? (uint32_t)(sum / n) : 0; } };
-
-uint32_t timeBlocking(EInkDisplay::RefreshMode mode, uint8_t* fb, uint16_t seedLines) {
-  renderFakePage(fb, seedLines);
-  const uint32_t t0 = millis();
-  display.displayBuffer(mode);
-  return millis() - t0;
-}
-
-// Does refresh cost scale with the number of gate lines driven? That is the
-// whole hypothesis behind implementing a window. Sweep heights and see.
-void measureWindowScaling(uint8_t* fb) {
-  Serial.println("-- windowed refresh, height sweep (x=0 w=800) --");
-  Serial.println("   rows |  ms | vs full panel");
-  const uint16_t heights[] = {32, 64, 128, 240, 480};
-  for (uint16_t h : heights) {
-    // Seed a settled baseline so the OLD plane is valid and the DU has a real
-    // diff to develop; without this the first window measures nothing.
-    renderFakePage(fb, 14);
-    display.displayBuffer(EInkDisplay::FAST_REFRESH);
-
-    // Dirty only the rows the window will cover.
-    for (uint16_t yy = 0; yy < h; ++yy)
-      for (uint16_t xb = 0; xb < kRowBytes; ++xb)
-        fb[(uint32_t)yy * kRowBytes + xb] = (yy / 8) % 2 ? 0x00 : 0xFF;
-
-    const uint32_t t0 = millis();
-    display.displayWindow(0, 0, kW, h);
-    const uint32_t ms = millis() - t0;
-    Serial.printf("   %4u | %3lu | %lu%%\n", h, (unsigned long)ms,
-                  (unsigned long)(ms * 100 / 554));
+void redraw(uint8_t* fb, bool connected) {
+  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+  // Status bar: solid when connected, dashed while searching.
+  if (connected) {
+    fillRect(fb, kMargin, 24, kW - 2 * kMargin, 12, true);
+  } else {
+    for (uint16_t x = kMargin; x < kW - kMargin; x += 40)
+      fillRect(fb, x, 24, 20, 12, true);
   }
-  Serial.println();
+  for (uint16_t i = 0; i < gTyped && i < kCols * 20; ++i) {
+    const uint16_t c = i % kCols, r = i / kCols;
+    fillRect(fb, kMargin + c * (kCell + kGap), kTopBar + r * (kCell + kGap), kCell, kCell, true);
+  }
 }
 
-// What a real editor does: never block on the panel. Accept keystrokes at a
-// human cadence, coalesce them into the buffer, and refresh only when the panel
-// is free. The number that matters is the WORST-CASE age of a character when it
-// finally becomes visible.
-void measureCoalescedTyping(uint8_t* fb, uint16_t lineY, uint16_t lineH, bool useWindow) {
-  renderFakePage(fb, 14);
-  display.displayBuffer(EInkDisplay::FAST_REFRESH);
-
-  constexpr uint16_t kKeys = 30;
-  constexpr uint32_t kCadenceMs = 200;   // 5 char/s, a brisk but human pace
-  uint32_t pressedAt[kKeys];
-  bool shown[kKeys];
-  for (uint16_t i = 0; i < kKeys; ++i) shown[i] = false;
-
-  uint32_t worstAge = 0, sumAge = 0;
-  uint16_t shownCount = 0, refreshes = 0;
-  uint16_t oldest = 0;
-
-  const uint32_t start = millis();
-  for (uint16_t i = 0; i < kKeys; ++i) {
-    while (millis() - start < (uint32_t)i * kCadenceMs) { /* wait for the "keypress" */ }
-    pressedAt[i] = millis();
-    typeOneChar(fb, i);
-
-    if (!display.refreshBusy()) {
-      if (useWindow) display.displayWindow(0, lineY, kW, lineH);
-      else display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
-      ++refreshes;
-      const uint32_t now = millis();
-      for (uint16_t j = oldest; j <= i; ++j) {
-        if (!shown[j]) { shown[j] = true; ++shownCount;
-          const uint32_t age = now - pressedAt[j];
-          worstAge = max(worstAge, age); sumAge += age; }
-      }
-      oldest = i;
-    }
-  }
-  display.waitRefreshComplete();
-  const uint32_t now = millis();
-  for (uint16_t j = 0; j < kKeys; ++j)
-    if (!shown[j]) { const uint32_t age = now - pressedAt[j];
-      worstAge = max(worstAge, age); sumAge += age; ++shownCount; }
-
-  Serial.printf("  %-14s refreshes=%u  chars/refresh=%.1f  age avg %lu ms / worst %lu ms\n",
-                useWindow ? "windowed:" : "whole-panel:", refreshes,
-                refreshes ? (float)kKeys / refreshes : 0.0f,
-                (unsigned long)(sumAge / kKeys), (unsigned long)worstAge);
+void flushLine() {
+  if (!gLineLen) return;
+  gLine[gLineLen] = 0;
+  Serial.printf("[text] %s\n", gLine);
+  gLineLen = 0;
 }
 
-void runBenchmark() {
-  uint8_t* fb = display.getFrameBuffer();
-  if (!fb) { Serial.println("[err] no framebuffer"); return; }
-
-  Serial.println();
-  Serial.println("############ M3: typing-latency spike ############");
-  Serial.printf("panel        : %ux%u, UC8179 (windowed refresh NOT supported)\n", kW, kH);
-  Serial.printf("async refresh: %s\n",
-                display.supportsAsyncRefresh() ? "YES (real overlap)" : "no (falls back to blocking)");
-  Serial.println();
-
-  // --- 1. whole-panel blocking refresh, per mode ---
-  Serial.println("-- blocking whole-panel refresh --");
-  Serial.printf("  FULL_REFRESH : %lu ms\n", (unsigned long)timeBlocking(EInkDisplay::FULL_REFRESH, fb, 12));
-  Serial.printf("  HALF_REFRESH : %lu ms\n", (unsigned long)timeBlocking(EInkDisplay::HALF_REFRESH, fb, 13));
-  Serial.printf("  FAST_REFRESH : %lu ms\n", (unsigned long)timeBlocking(EInkDisplay::FAST_REFRESH, fb, 14));
-  Serial.println();
-
-  // --- 2. async: how fast does the call hand control back? ---
-  renderFakePage(fb, 15);
-  uint32_t t0 = millis();
-  display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
-  const uint32_t returnMs = millis() - t0;
-  while (display.refreshBusy()) { /* spin */ }
-  const uint32_t completeMs = millis() - t0;
-  Serial.println("-- async FAST refresh --");
-  Serial.printf("  call returns after : %lu ms   <- how long typing is blocked\n",
-                (unsigned long)returnMs);
-  Serial.printf("  panel settles after: %lu ms   <- when the reader sees it\n",
-                (unsigned long)completeMs);
-  Serial.println();
-
-  // --- 3. the number that matters: sustained typing ---
-  // Each iteration = one keystroke: mutate the buffer, fire a refresh, and
-  // measure how long until we could accept the NEXT keystroke.
-  Serial.println("-- simulated typing, 20 keystrokes --");
-  display.waitRefreshComplete();
-  renderFakePage(fb, 10);
-  display.displayBuffer(EInkDisplay::FAST_REFRESH);
-
-  Stats blocked, settle;
-  for (uint16_t i = 0; i < 20; ++i) {
-    typeOneChar(fb, i);
-    const uint32_t k0 = millis();
-    display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
-    blocked.add(millis() - k0);
-    while (display.refreshBusy()) { /* spin */ }
-    settle.add(millis() - k0);
-  }
-  Serial.printf("  input blocked : min %lu / avg %lu / max %lu ms\n",
-                (unsigned long)blocked.lo, (unsigned long)blocked.avg(), (unsigned long)blocked.hi);
-  Serial.printf("  char visible  : min %lu / avg %lu / max %lu ms\n",
-                (unsigned long)settle.lo, (unsigned long)settle.avg(), (unsigned long)settle.hi);
-  Serial.println();
-  Serial.printf("  => visible-feedback rate: ~%lu chars/sec (settle-bound, NOT the input ceiling)\n",
-                settle.avg() ? (unsigned long)(1000UL / settle.avg()) : 0UL);
-  Serial.println();
-
-  // --- 4. the hypothesis: does a window actually cost less? ---
-  measureWindowScaling(fb);
-
-  // --- 5. realistic editor behaviour, both strategies ---
-  Serial.println("-- coalesced typing at 5 char/s, 30 keystrokes --");
-  measureCoalescedTyping(fb, 8 + 6 * kLineHeight, 32, false);
-  measureCoalescedTyping(fb, 8 + 6 * kLineHeight, 32, true);
-  Serial.println();
-  Serial.println("#################################################");
-  Serial.println("Hold RIGHT 2s to boot the other slot.");
+void appendText(const char* s, uint8_t len) {
+  for (uint8_t i = 0; i < len && gLineLen < sizeof(gLine) - 1; ++i) gLine[gLineLen++] = s[i];
 }
 
 void bootOtherSlot() {
   const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
-  if (!other) { Serial.println("[err] no other OTA slot"); return; }
+  if (!other) return;
   Serial.printf("[..] switching to %s\n", other->label);
-  if (esp_ota_set_boot_partition(other) != ESP_OK) { Serial.println("[err] switch failed"); return; }
+  if (esp_ota_set_boot_partition(other) != ESP_OK) return;
   Serial.flush();
   delay(100);
   esp_restart();
@@ -245,6 +101,32 @@ void pollSwitchButton() {
   else if (now - downSince >= kHoldMs) { downSince = 0; bootOtherSlot(); }
 }
 
+void handleScanResults() {
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  if (ble.isScanning() || !gScanRequested) return;
+  gScanRequested = false;
+
+  const uint8_t n = ble.deviceCount();
+  Serial.printf("[ble] scan finished, %u device(s)\n", n);
+  int best = -1;
+  for (uint8_t i = 0; i < n; ++i) {
+    const auto& d = ble.device(i);
+    Serial.printf("  %2u %-24s %-18s rssi=%4d hid=%d connectable=%d\n",
+                  i, d.name, d.addr, d.rssi, d.hid ? 1 : 0, d.connectable ? 1 : 0);
+    // Prefer the strongest connectable HID advertiser.
+    if (d.hid && d.connectable && (best < 0 || d.rssi > ble.device(best).rssi)) best = i;
+  }
+  if (best < 0) {
+    Serial.println("[ble] no connectable HID device found — rescanning");
+    ble.startScan(8000);
+    gScanRequested = true;
+    gScanStartedAt = millis();
+    return;
+  }
+  Serial.printf("[ble] connecting to %s (%s)\n", ble.device(best).name, ble.device(best).addr);
+  ble.connect(ble.device(best).addr);
+}
+
 }  // namespace
 
 void setup() {
@@ -253,17 +135,92 @@ void setup() {
   esp_ota_mark_app_valid_cancel_rollback();
   pinMode(kSwitchButton, INPUT_PULLUP);
 
-  gPanelPromoted = freeink::applyXteinkDisplayController();
-  Serial.printf("\n[boot] slot=%s controller=%s psram=%u\n",
-                esp_ota_get_running_partition()->label,
-                gPanelPromoted ? "UC81xx (probed)" : "SSD1677 (default)",
-                (unsigned)ESP.getPsramSize());
-
+  freeink::applyXteinkDisplayController();
   display.begin();
-  runBenchmark();
+  redraw(display.getFrameBuffer(), false);
+  display.displayBuffer(EInkDisplay::FULL_REFRESH);
+
+  Serial.println("\n=== PocketX Writer :: M4 BLE keyboard ===");
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  if (!ble.begin("PocketX Writer")) {
+    Serial.println("[err] BLE init failed");
+    return;
+  }
+  Serial.printf("[ble] host up, %u known pairing(s)\n", ble.pairedCount());
+  for (uint8_t i = 0; i < ble.pairedCount(); ++i)
+    Serial.printf("  bonded: %s (%s)\n", ble.paired(i).name, ble.paired(i).addr);
+
+  if (ble.pairedCount() == 0) {
+    Serial.println("[ble] scanning 8s — put your keyboard in pairing mode");
+    ble.startScan(8000);
+    gScanRequested = true;
+    gScanStartedAt = millis();
+  } else {
+    Serial.println("[ble] waiting for auto-reconnect to a bonded keyboard");
+  }
 }
 
 void loop() {
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  ble.poll();
   pollSwitchButton();
-  delay(20);
+  handleScanResults();
+
+  static bool wasConnected = false;
+  const bool connected = ble.isConnected();
+  if (connected != wasConnected) {
+    wasConnected = connected;
+    Serial.printf("[ble] %s%s%s\n", connected ? "connected to " : "disconnected",
+                  connected ? ble.connectedName() : "", connected ? "" : "");
+    if (connected) ble.releaseScanResults();
+    gDirty = true;
+    gPendingSince = millis();
+  }
+
+  freeink::KeyEvent ev;
+  while (ble.popKey(ev)) {
+    if (ev.special == freeink::SpecialKey::Enter) {
+      flushLine();
+      Serial.println("[key] Enter");
+      continue;
+    }
+    if (ev.special == freeink::SpecialKey::Backspace) {
+      if (gLineLen) --gLineLen;
+      if (gTyped) --gTyped;
+      Serial.println("[key] Backspace");
+      gDirty = true;
+      if (!gPendingSince) gPendingSince = millis();
+      continue;
+    }
+    if (ev.special != freeink::SpecialKey::None) {
+      Serial.printf("[key] special=%u\n", (unsigned)ev.special);
+      continue;
+    }
+
+    pocketx::KeyText txt;
+    if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) {
+      Serial.printf("[key] ignored usage=0x%02X mods=0x%02X\n", ev.keycode, ev.mods);
+      continue;
+    }
+    if (txt.consumedAsDead) { Serial.println("[key] dead key armed"); continue; }
+
+    appendText(txt.utf8, txt.len);
+    ++gTyped;
+    gDirty = true;
+    if (!gPendingSince) gPendingSince = millis();
+    // Show what the SDK's US table would have produced, so a layout regression
+    // is visible rather than silent.
+    Serial.printf("[key] usage=0x%02X mods=0x%02X -> \"%s\"  (sdk ascii: '%c')\n",
+                  ev.keycode, ev.mods, txt.utf8, ev.ch ? ev.ch : ' ');
+  }
+
+  // M3's lesson: never block on the panel. Coalesce and refresh when it is free.
+  if (gDirty && !display.refreshBusy() && millis() - gPendingSince >= 120) {
+    redraw(display.getFrameBuffer(), connected);
+    display.displayBufferAsync(EInkDisplay::FAST_REFRESH);
+    gDirty = false;
+    gPendingSince = 0;
+  }
+
+  delay(5);
 }
