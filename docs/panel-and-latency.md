@@ -81,30 +81,73 @@ our x/y/w/h and slicing the framebuffer rows to match, with
 `Ssd1677Driver::displayWindow()` as the reference for the byte-alignment rules
 (`x % 8 == 0`, `w % 8 == 0`) and bounds checks.
 
-### The payoff is a hypothesis, not a promise
+### Measured: the window hypothesis is WRONG
 
-The working assumption is that UC8279 partial refresh time scales with the
-number of gate lines driven, so a 26 px line (~5.4% of 480 rows) would cost far
-less than a full panel. **That is a plausible model of the hardware, not a
-measured fact.** Waveform time may have a large fixed component that a small
-window does not avoid.
+The height sweep settles it. Same content, same panel, only the PTL rectangle
+changes:
 
-M3b tests exactly this: drive one 26-row window at a known Y with a solid test
-strip and measure. Everything else — alignment, edge cases, integration —
-follows only if that number is good.
+| window rows | refresh | vs. full panel |
+|---|---|---|
+| 32 | 514 ms | **92%** |
+| 64 | 517 ms | 93% |
+| 128 | 523 ms | 94% |
+| 240 | 533 ms | 96% |
+| 480 | 556 ms | 100% |
 
-### Known risks in the implementation
+**A 32-row window costs 92% of a full-panel repaint.** Refresh time is almost
+entirely fixed. The model — "cost scales with gate lines driven" — was wrong.
 
-- **Gate offset.** A driver comment records the OEM sequence as
-  `PTIN -> PTL(full window, +120 gate offset)`. Panel gate line 0 is apparently
-  not framebuffer row 0 on this glass. A window's Y must carry the same
-  transform or it will refresh the wrong strip.
-- **Old-plane sync.** UC8279 partial mode diffs the old plane against the new
-  plane in controller RAM. This build is `EINK_DISPLAY_SINGLE_BUFFER_MODE=1`, so
-  the facade passes `prev = nullptr`. If a window uploads only the new plane for
-  its region, the old plane for that region must already be in sync, or the
-  diff runs against stale data and the region ghosts or does not update.
+The driver config says why:
 
-If the PTL descriptor turns out to fight us, the fallback is coalescing plus a
-typewriter mode at the full-panel cost — which is what the existing X4 writing
-firmware ships.
+```cpp
+600,   // tresHeight — addressed 800x600 (480 visible)
+120,   // gateOffset — visible gates start at 120 on this variant
+```
+
+The controller scans **all 600 addressed gate lines on every refresh**,
+regardless of PTL. The window decides which pixels *develop*, not how long the
+scan takes. So there is no windowed shortcut to lower latency on this glass.
+
+`Uc8279X4Driver::displayWindow()` is still implemented and correct (SDK branch
+`uc8279x4-display-window`), and it is kept so nobody has to rediscover this —
+but the editor must not be built around it.
+
+## What actually works: async + coalescing
+
+A real editor never blocks on the panel. It accepts keystrokes, coalesces them
+into the framebuffer, and fires a refresh only when the panel is free. Measured
+at a human 5 char/s over 30 keystrokes:
+
+| strategy | refreshes | chars/refresh | avg age | **worst age** |
+|---|---|---|---|---|
+| **whole-panel async + coalescing** | 10 | 3.0 | 270 ms | **477 ms** |
+| windowed, per keystroke | 30 | 1.0 | 514 ms | 514 ms |
+
+Coalescing wins outright, and it wins *because* it batches: three characters per
+refresh instead of one. The windowed variant is worse because our
+`displayWindow()` is synchronous — it blocks for its full 514 ms, so every
+keystroke pays in full and nothing ever coalesces.
+
+### The honest verdict
+
+- **Input is never the bottleneck.** Async refresh returns in ~75 ms, a ~13
+  char/s ceiling against a fast typist's ~6.7 char/s. The keyboard will feel
+  responsive; it will not stutter or drop characters.
+- **Display feedback lags: ~270 ms typical, ~477 ms worst case.** That is a real
+  limitation of this hardware, not something more code removes. It is, however,
+  roughly half the naive 554 ms per keystroke.
+- Design the editor so the lag is tolerable rather than pretending it is absent:
+  batch on word boundaries and pauses, and keep a cursor cue that does not need
+  a panel refresh to feel alive.
+
+### One untested lever
+
+`pll = 0x0E // (0x30) — X4 Pro only` sets the panel's frame rate, and waveform
+LUT phases are counted in frames. A faster PLL would shorten every refresh
+proportionally. It also trades directly against transition quality and DC
+balance, so it is a separate, riskier investigation — not a free win.
+
+### Still unmeasured
+
+FULL and HALF blocking refresh times scrolled past before the serial monitor
+attached. FULL matters later for sizing the periodic ghost-clearing refresh.
