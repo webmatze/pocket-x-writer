@@ -168,7 +168,8 @@ void pollHunt() {
 // HID device nearby" is not the same as "the user's keyboard". Pairing is a
 // decision, so a human makes it.
 void pollSerialCommands() {
-  static char line[16];
+  // Must hold the longest command: 'a' + "AA:BB:CC:DD:EE:FF" + NUL = 19.
+  static char line[40];
   static uint8_t len = 0;
   auto& ble = freeink::BleKeyboardHost::getInstance();
 
