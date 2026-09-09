@@ -95,8 +95,18 @@ switch on the keyboard.
 
 Switching slots is **one way from the device**. `esp_ota_set_boot_partition()`
 is permanent, and hold-Right-to-switch is a feature of *this* firmware, so
-whatever is in the other slot most likely cannot bring you back. Getting out
-again needs a computer and `scripts/select-slot.py --slot 1`.
+whatever is in the other slot has no reason to offer the reverse — CrossPoint
+does not.
+
+Ways back, in the order you would reach for them: `scripts/select-slot.py
+--slot 1` from a computer; **CrossPoint's own Settings → SD Firmware Update**,
+which installs a `.bin` from the card and needs no computer at all — so keep a
+copy of `firmware.bin` on the card, because once you are stuck in the reader you
+cannot put one there; or, if nothing boots, the reset button and the ROM
+download mode below.
+
+Full picture, including the one-shot-boot idea that measurement ruled out:
+[`docs/dual-boot.md`](docs/dual-boot.md).
 
 ### The reset button is your way out
 
