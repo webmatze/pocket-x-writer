@@ -91,17 +91,38 @@ switch on the keyboard.
 
 ### Device buttons
 
+The device is held in **landscape**, which puts the Right key physically at the
+*top*. So **Left means forward and down, Right means back and up** — the same in
+the editor and in every list. That is the inverse of the SDK's page-turn mapping
+for these keys, which assumes the portrait grip a reader is held in; this one is
+not held that way.
+
+In the editor:
+
 | | |
 |---|---|
-| **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
-| **Left** (hold ~0.6 s) | open the menu — in a list: open the selected entry |
-| **Left** (short, in a list) | down one entry (wraps) |
-| **Right** (short, in a list) | up one entry (wraps) |
-| **Home** (capacitive, below the screen) | open the menu — in a menu: step back |
-| **Right** (hold 2 s, from the editor) | reboot into the other firmware slot — **one way**, see below |
-| **Power** (short press) | sleep now — saves first, then shows a sleep screen |
+| **Left** (tap) | next chapter |
+| **Right** (tap) | previous chapter |
+| **Left** (hold) | cycle frontlight: off → 12 → 30 → 60 → 100% |
+| **Right** (hold) | open the menu |
+| **Home** (capacitive, below the screen) | open the menu |
+| **Power** (tap) | sleep now — saves first, then shows a sleep screen |
 | **Power** (while asleep) | wake |
 | **Reset** (small button on the top edge) | hardware reset — see below |
+
+In a menu or list:
+
+| | |
+|---|---|
+| **Left** (tap) | down one entry (wraps) |
+| **Right** (tap) | up one entry (wraps) |
+| **Left** (hold) | open the selected entry |
+| **Home** | one level back |
+
+Paging through a book is the frequent gesture, so it gets the tap; the
+frontlight is still on a physical key you can find in the dark, just held rather
+than tapped. Every screen also carries its own way out as an entry, so the Left
+key alone can leave any of them.
 
 Switching slots is **one way from the device**, and it lives in the menu as
 **Reader starten**, behind a yes/no question — a trip that ends at a computer is
