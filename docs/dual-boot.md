@@ -53,8 +53,13 @@ explicitly allowed, and ours carries none.
 >
 > ```bash
 > # with the card mounted over Ctrl+U
-> cp .pio/build/x4pro/firmware.bin "/Volumes/NO NAME/"
+> cp .pio/build/x4pro/firmware.bin "/Volumes/NO NAME/pocketx-writer.bin"
 > ```
+>
+> Give it a name you will recognise in a file browser, and **refresh it whenever
+> you flash** — the card cannot be mounted while the firmware runs, so nothing
+> keeps the copy in step for you. A stale copy still works; it just restores an
+> older writer than the one you were using.
 
 **Status: derived from CrossPoint's source, not yet exercised end to end.** The
 mechanism and the guard were read in
