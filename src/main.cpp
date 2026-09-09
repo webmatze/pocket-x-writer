@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <esp_ota_ops.h>
+#include <esp_system.h>
 #include <soc/rtc_cntl_reg.h>
 #include <soc/usb_serial_jtag_reg.h>
 
@@ -733,6 +734,26 @@ void pollConnectTimeout() {
 
 }  // namespace
 
+// Why the chip last restarted. The ROM prints this too, but a hardware reset
+// re-enumerates USB and the host misses every byte until the port returns --
+// which is precisely the case worth diagnosing. Printed after Serial's settling
+// delay so it survives.
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:  return "power-on / EN pin -- RTC domain reset too";
+    case ESP_RST_EXT:      return "external reset pin";
+    case ESP_RST_SW:       return "esp_restart() -- RTC domain survives";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:  return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT:      return "other watchdog";
+    case ESP_RST_DEEPSLEEP:return "wake from deep sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_USB:      return "USB peripheral";
+    default:               return "unknown";
+  }
+}
+
 void setup() {
   // FIRST, before anything touches a peripheral: close the power latch.
   // On the X4 Pro power.latch0 is GPIO1, the master peripheral-rail enable that
@@ -746,6 +767,8 @@ void setup() {
 
   Serial.begin(115200);
   delay(2000);
+  const esp_reset_reason_t why = esp_reset_reason();
+  Serial.printf("[boot] reset reason %d: %s\n", (int)why, resetReasonName(why));
   esp_ota_mark_app_valid_cancel_rollback();
   pinMode(kSwitchButton, INPUT_PULLUP);
 

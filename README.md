@@ -88,9 +88,39 @@ switch on the keyboard.
 | | |
 |---|---|
 | **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
-| **Right** (hold 2 s) | reboot into the other firmware slot |
+| **Right** (hold 2 s) | reboot into the other firmware slot — **one way**, see below |
 | **Power** (short press) | sleep now — saves first, then shows a sleep screen |
 | **Power** (while asleep) | wake |
+| **Reset** (small button on the top edge) | hardware reset — see below |
+
+Switching slots is **one way from the device**. `esp_ota_set_boot_partition()`
+is permanent, and hold-Right-to-switch is a feature of *this* firmware, so
+whatever is in the other slot most likely cannot bring you back. Getting out
+again needs a computer and `scripts/select-slot.py --slot 1`.
+
+### The reset button is your way out
+
+The small button on the top edge is a **hardware reset on the EN line**, not a
+software reboot. Verified on hardware: `esp_reset_reason()` reports
+`ESP_RST_POWERON` (1), and USB drops and re-enumerates — where an `esptool`
+DTR reset reports `ESP_RST_USB` (11) and keeps the port.
+
+That distinction matters, because it resets the **RTC domain** as well. Some
+chip state lives there and survives `esp_restart()`, a firmware switch, and even
+unplugging the cable once the power latch is asserted — the USB pad routing left
+behind by TinyUSB is the example that bites. When the device is running fine but
+has vanished from USB entirely, this button is the only thing short of a flat
+battery that clears it.
+
+Holding **Left** (GPIO0, the boot strap) while pressing it should drop the chip
+into the ROM download mode — the recovery path if a firmware ever fails to boot.
+Untested here; the strapping behaviour is standard for the ESP32-S3.
+
+Every boot now prints why it happened:
+
+```
+[boot] reset reason 1: power-on / EN pin -- RTC domain reset too
+```
 
 ---
 
