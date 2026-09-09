@@ -44,6 +44,11 @@ works perfectly.
    - Contains `ACL`, no `GATT` → **Bluetooth Classic. Will not work.**
    - Lists LE / GATT services → BLE. Should work.
 
+Pairing happens on the device — `Esc` → **Tastatur …** → **Suchen …**, then pick
+your keyboard from the list. No computer, no serial console. Only devices that
+advertise HID and accept a connection are listed, which keeps the neighbour's
+remote control out of it.
+
 See [`docs/keyboard-compatibility.md`](docs/keyboard-compatibility.md) for the
 full evidence.
 
@@ -76,7 +81,7 @@ full evidence.
 | `Ctrl`+`←`/`→` | move by word |
 | `Ctrl+Home` / `Ctrl+End` | jump to the start / end of the chapter |
 | `Ctrl+Backspace` | delete previous word |
-| `Esc` | menu: chapters, books — again to leave it |
+| `Esc` | menu: chapters, books, keyboard — again to leave it |
 | `PageUp` / `PageDown` | previous / next chapter |
 | `Ctrl+N` | new chapter (also the last entry in the chapter list) |
 | `Ctrl+U` | mount the SD card on your computer |

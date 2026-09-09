@@ -427,17 +427,30 @@ void newChapter() {
 // `while` loop here would switch all of that off silently, and the first symptom
 // would be a device that never sleeps while a menu is open.
 
-enum class Overlay : uint8_t { None, Menu, Chapters, Books, Prompt };
+enum class Overlay : uint8_t { None, Menu, Chapters, Books, Keyboard, Prompt };
 Overlay gOverlay = Overlay::None;
 pocketx::ListState gList;
 
 // The menu is the level above a single book. Kept as a plain array because it
 // is fixed: entries appear here when they exist, not before.
-const char* const kMenuItems[] = {"Kapitel ...", "Bücher ..."};
+const char* const kMenuItems[] = {"Kapitel ...", "Bücher ...", "Tastatur ..."};
 constexpr uint16_t kMenuCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
 
 pocketx::Book gBooks[pocketx::Storage::kMaxBooks];
 uint16_t gBookCount = 0;
+
+// One row of the keyboard screen. The list is flat and rebuilt whenever the
+// state changes, because what belongs on it depends entirely on that state:
+// bonded keyboards, then whatever a scan turned up.
+struct KbEntry {
+  char label[52];
+  char addr[18];
+  uint8_t kind;      // 0 scan, 1 bonded, 2 found, 3 forget all
+};
+KbEntry gKb[1 + freeink::BleKeyboardHost::kMaxBonds +
+            freeink::BleKeyboardHost::kMaxDiscovered + 1];
+uint16_t gKbCount = 0;
+bool gKbScanning = false;
 
 // A one-line text field, for the things that cannot name themselves. A chapter
 // can be labelled by its first line; an empty book has nothing to derive a name
@@ -492,6 +505,61 @@ void openChapterPicker() {
   // the same gesture in both places, and nothing to discover separately.
   gList.reset((uint32_t)gChapterCount + 1, gChapterIndex, overlayRows());
   gOverlay = Overlay::Chapters;
+  wakeOverlay();
+}
+
+void buildKeyboardList() {
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  gKbCount = 0;
+  const uint16_t cap = (uint16_t)(sizeof(gKb) / sizeof(gKb[0]));
+
+  auto add = [&](const char* label, uint8_t kind, const char* addr) {
+    if (gKbCount >= cap) return;
+    snprintf(gKb[gKbCount].label, sizeof(gKb[0].label), "%s", label);
+    snprintf(gKb[gKbCount].addr, sizeof(gKb[0].addr), "%s", addr ? addr : "");
+    gKb[gKbCount].kind = kind;
+    ++gKbCount;
+  };
+
+  add("Suchen ...", 0, nullptr);
+
+  for (uint8_t i = 0; i < ble.pairedCount(); ++i) {
+    const auto& b = ble.paired(i);
+    add(b.name[0] ? b.name : b.addr, 1, b.addr);
+  }
+
+  // Only devices that actually advertise HID and accept a connection. A scan
+  // hears everything in the room, and a neighbour's remote control has no
+  // business in a list of keyboards -- that mistake was made once already.
+  for (uint8_t i = 0; i < ble.deviceCount(); ++i) {
+    const auto& d = ble.device(i);
+    if (!d.hid || !d.connectable) continue;
+    char l[52];
+    snprintf(l, sizeof(l), "%s   %d dBm", d.hasName ? d.name : d.addr, d.rssi);
+    add(l, 2, d.addr);
+  }
+
+  if (ble.pairedCount()) add("Kopplungen löschen", 3, nullptr);
+}
+
+void openKeyboardScreen() {
+  gKbScanning = false;
+  buildKeyboardList();
+  gList.reset(gKbCount, 0, overlayRows());
+  gOverlay = Overlay::Keyboard;
+  wakeOverlay();
+}
+
+// A scan takes seconds and devices trickle in. Redrawing on each discovery would
+// cost a full-panel refresh per device; the list is rebuilt once, when the scan
+// is over.
+void pollKeyboardScreen() {
+  if (gOverlay != Overlay::Keyboard || !gKbScanning) return;
+  auto& ble = freeink::BleKeyboardHost::getInstance();
+  if (ble.isScanning()) return;
+  gKbScanning = false;
+  buildKeyboardList();
+  gList.reset(gKbCount, gList.selected(), overlayRows());
   wakeOverlay();
 }
 
@@ -602,7 +670,8 @@ void overlayConfirm() {
     case Overlay::Menu: {
       const uint32_t pick = gList.selected();
       if (pick == 0) openChapterPicker();
-      else openBookPicker();
+      else if (pick == 1) openBookPicker();
+      else openKeyboardScreen();
       break;
     }
     case Overlay::Chapters: {
@@ -618,6 +687,39 @@ void overlayConfirm() {
       if (pick >= gBookCount) { openPrompt("Neues Buch - Titel:", PromptFor::NewBook); break; }
       closeOverlay();
       if (strcmp(gBooks[pick].slug, gStorage.bookSlug()) != 0) switchToBook((uint16_t)pick);
+      break;
+    }
+    case Overlay::Keyboard: {
+      const uint32_t pick = gList.selected();
+      if (pick >= gKbCount) break;
+      auto& ble = freeink::BleKeyboardHost::getInstance();
+      switch (gKb[pick].kind) {
+        case 0:
+          ble.startScan(8000);
+          gKbScanning = true;
+          gScanRequested = true;   // also dump the results to serial, for diagnosis
+          break;
+        case 1:
+        case 2:
+          Serial.printf("[ble] connecting to %s\n", gKb[pick].addr);
+          gConnectStartedAt = millis();
+          ble.connect(gKb[pick].addr);
+          break;
+        case 3: {
+          // Copy each address out before forgetting it: the list shifts under
+          // the iteration otherwise.
+          char addrs[freeink::BleKeyboardHost::kMaxBonds][18];
+          const uint8_t n = ble.pairedCount();
+          for (uint8_t i = 0; i < n; ++i)
+            snprintf(addrs[i], sizeof(addrs[0]), "%s", ble.paired(i).addr);
+          for (uint8_t i = 0; i < n; ++i) ble.forget(addrs[i]);
+          buildKeyboardList();
+          gList.reset(gKbCount, 0, overlayRows());
+          break;
+        }
+        default: break;
+      }
+      wakeOverlay();
       break;
     }
     case Overlay::Prompt: promptConfirm(); break;
@@ -661,6 +763,13 @@ void drawOverlay(uint8_t* fb) {
     case Overlay::Books:
       snprintf(title, sizeof(title), "Bücher  %u", (unsigned)gBookCount);
       break;
+    case Overlay::Keyboard: {
+      auto& ble = freeink::BleKeyboardHost::getInstance();
+      snprintf(title, sizeof(title), "Tastatur · %s%s",
+               ble.isConnected() ? "verbunden: " : "nicht verbunden",
+               ble.isConnected() ? ble.connectedName() : "");
+      break;
+    }
     default:
       // The book belongs here rather than in the status line: this is the moment
       // you are navigating, and the status line has no room to spare without
@@ -679,6 +788,9 @@ void drawOverlay(uint8_t* fb) {
     switch (gOverlay) {
       case Overlay::Menu:
         snprintf(row, sizeof(row), "%s", kMenuItems[i]);
+        break;
+      case Overlay::Keyboard:
+        snprintf(row, sizeof(row), "%s", gKb[i].label);
         break;
       case Overlay::Books:
         if (i < gBookCount) {
@@ -703,8 +815,13 @@ void drawOverlay(uint8_t* fb) {
     y += kFont.yAdvance;
   }
 
-  pocketx::drawText(canvas, kFont, kMargin, kH - 12,
-                    "Enter öffnet · Esc zurück · Links: weiter / lang öffnen");
+  const char* hint = "Enter öffnet · Esc zurück · Links: weiter / lang öffnen";
+  if (gOverlay == Overlay::Keyboard) {
+    auto& ble = freeink::BleKeyboardHost::getInstance();
+    if (gKbScanning) hint = "Suche läuft, einen Moment ...";
+    else if (ble.isConnecting()) hint = "Verbinde ...";
+  }
+  pocketx::drawText(canvas, kFont, kMargin, kH - 12, hint);
 }
 
 // Hand the SD card to the Mac over the same USB-C cable that powers the device.
@@ -1182,6 +1299,7 @@ void loop() {
   pollSwitchButton();
   pollLightButton();
   pollPowerButton();
+  pollKeyboardScreen();
 
   // Idle long enough to be gone rather than thinking.
   if (!gUsbMode && gLastActivityAt && millis() - gLastActivityAt >= kSleepAfterMs) sleepNow();
@@ -1197,6 +1315,13 @@ void loop() {
     Serial.printf("[ble] %s%s%s\n", connected ? "connected to " : "disconnected",
                   connected ? ble.connectedName() : "", connected ? "" : "");
     if (connected) ble.releaseScanResults();
+    // The keyboard screen states the connection in its header, so it has to be
+    // rebuilt when that changes -- otherwise it shows the state from before the
+    // very action the writer just took.
+    if (gOverlay == Overlay::Keyboard) {
+      buildKeyboardList();
+      gList.reset(gKbCount, gList.selected(), overlayRows());
+    }
     gDirty = true;
     gPendingSince = millis();
   }
