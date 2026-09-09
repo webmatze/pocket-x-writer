@@ -245,6 +245,12 @@ Bootloader and partition table are never touched, so whatever lives in the other
 slot survives — you can keep a reader firmware alongside this one and switch
 with a 2-second hold of the Right button.
 
+**NVS is not touched either**, so keyboard pairings and the frontlight setting
+survive every firmware update — verified across an update installed from the SD
+card. What *would* clear them is a full-image `restore-device.sh` (the dump
+carries the NVS of the day it was taken), an `esptool erase-flash`, or the `f`
+serial command.
+
 Deliberately **not** `pio run -t upload`: that flashes a partition table too, and
 PlatformIO's default table would rewrite the device's and destroy the other slot.
 

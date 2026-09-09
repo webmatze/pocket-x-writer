@@ -70,6 +70,10 @@ CrossPoint writes the image you give it, exactly.
 Walk it once yourself while a cable is still at hand. A rescue path nobody has
 taken is a hypothesis, the same way a backup nobody has restored is.
 
+It costs you nothing else: the update writes an app partition and `otadata`, and
+leaves `nvs` alone, so keyboard pairings and settings come through it intact —
+checked after the run above, the bonded keyboard was still there.
+
 ## 3. Emergency: the reset button
 
 If neither works — a firmware that will not boot at all — hold **Left** through
