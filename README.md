@@ -60,7 +60,7 @@ full evidence.
 - **Full German T1 layout**: QWERTZ, umlauts, ß, the German shift row, AltGr
   symbols (`@ € { [ ] } \ ~ | µ`), and dead keys that compose (`´` + `e` → `é`)
 - **Edit**: cursor navigation, word-wise movement, undo, selection, clipboard
-- **Book projects**: chapters as `chapters/NN-slug.md`, word count, daily goal
+- **Book projects**: several books, chapters as `chapters/NN-slug.md`, word count, daily goal
 - **Never lose work**: verified atomic saves, autosave on pause
 - **Sync**: the SD card mounts on your computer over the same USB-C cable
 - **Frontlight**, battery indicator, deep sleep, real file timestamps
@@ -76,7 +76,7 @@ full evidence.
 | `Ctrl`+`←`/`→` | move by word |
 | `Ctrl+Home` / `Ctrl+End` | jump to the start / end of the chapter |
 | `Ctrl+Backspace` | delete previous word |
-| `Esc` | chapter list — again to leave it |
+| `Esc` | menu: chapters, books — again to leave it |
 | `PageUp` / `PageDown` | previous / next chapter |
 | `Ctrl+N` | new chapter |
 | `Ctrl+U` | mount the SD card on your computer |
@@ -89,7 +89,7 @@ switch on the keyboard.
 | | |
 |---|---|
 | **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
-| **Left** (hold ~0.6 s) | open the chapter list — in the list: open the selected chapter |
+| **Left** (hold ~0.6 s) | open the menu — in a list: open the selected entry |
 | **Left** (short, in the list) | next entry (wraps) |
 | **Right** (hold 2 s) | reboot into the other firmware slot — **one way**, see below |
 | **Power** (short press) | sleep now — saves first, then shows a sleep screen |
@@ -159,9 +159,27 @@ Every boot now prints why it happened:
 ## Files on the card
 
 ```
-/books/<book>/chapters/01-erstes-kapitel.md
-                       02-zweites-kapitel.md
+/books/ueber-den-daechern/book.md
+                          chapters/01-erstes-kapitel.md
+                                   02-zweites-kapitel.md
 ```
+
+`book.md` holds the book's real title, which the directory name cannot: it is a
+slug, and `Über den Dächern` does not survive the trip. Frontmatter, because the
+metadata will not stop at a title — an author, a per-book word goal — and all of
+it is flat, so a small `key: value` parser beats a JSON dependency.
+
+```markdown
+---
+title: Über den Dächern
+---
+
+Notes below the block are yours; nothing here reads them.
+```
+
+Metadata never decides whether a book opens. No file, no block, or a mangled
+line costs one value and nothing else — a folder you create on the Mac is a book
+too, it just shows its directory name until you give it a title.
 
 Plain UTF-8 Markdown. Titles are transliterated to ASCII the way German does it
 (`Über den Dächern` → `ueber-den-daechern`), because SdFat cannot reopen a

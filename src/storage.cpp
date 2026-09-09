@@ -197,6 +197,32 @@ bool readBookMeta(const char* slug, char* out, uint32_t outSize) {
   return true;
 }
 
+// Write a minimal metadata block. Newlines are stripped from the title: one of
+// them inside the frontmatter would turn the rest of the file into something
+// else entirely.
+void writeBookMeta(const char* slug, const char* title) {
+  char clean[64];
+  uint32_t w = 0;
+  for (const char* p = title; *p && w + 1 < sizeof(clean); ++p)
+    if (*p != '\n' && *p != '\r') clean[w++] = *p;
+  clean[w] = 0;
+  if (!w) return;
+
+  char path[128];
+  snprintf(path, sizeof(path), "%s/%s/book.md", kBooks, slug);
+  FsFile f = SDCardManager::getInstance().open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  if (!f) {
+    // Not fatal: a book without metadata still opens, it just shows its slug.
+    Serial.println("[book] warning: could not write book.md");
+    return;
+  }
+  char meta[192];
+  const int len = snprintf(meta, sizeof(meta), "---\ntitle: %s\n---\n\n", clean);
+  if (len > 0) f.write((const uint8_t*)meta, (size_t)len);
+  f.sync();
+  f.close();
+}
+
 // Title of the book in `slug`, falling back to the directory name. A book whose
 // metadata is missing or damaged is still a book -- that rule is why this
 // returns void rather than a success flag.
@@ -231,7 +257,18 @@ bool Storage::openBookBySlug(const char* slug) {
 bool Storage::openBook(const char* bookTitle) {
   char slug[48];
   slugify(bookTitle, slug, sizeof(slug), "buch");
-  return openBookBySlug(slug);
+  if (!openBookBySlug(slug)) return false;
+
+  // The caller knew a real title. If the directory carries no metadata yet, give
+  // it some -- that is the migration for books made before book.md existed,
+  // which would otherwise show their slug forever with the umlauts and capitals
+  // gone. An existing block is never overwritten: it may have been edited.
+  char head[512];
+  if (!readBookMeta(slug, head, sizeof(head))) {
+    writeBookMeta(slug, bookTitle);
+    bookTitleFor(book_, title_, sizeof(title_));
+  }
+  return true;
 }
 
 uint16_t Storage::listBooks(Book* out, uint16_t max) {
@@ -284,29 +321,9 @@ bool Storage::createBook(const char* title, Book* out) {
   snprintf(chapters, sizeof(chapters), "%s/%s/chapters", kBooks, b.slug);
   if (!sd.mkdir(chapters)) return fail("cannot create chapters directory");
 
-  // The title as typed, so the slug's lost umlauts and capitals survive
-  // somewhere. Newlines are stripped: one of them in the frontmatter block
-  // would turn the rest of the file into something else entirely.
-  char clean[64];
-  uint32_t w = 0;
-  for (const char* p = title; *p && w + 1 < sizeof(clean); ++p)
-    if (*p != '\n' && *p != '\r') clean[w++] = *p;
-  clean[w] = 0;
-  snprintf(b.title, sizeof(b.title), "%s", w ? clean : b.slug);
-
-  char path[128];
-  snprintf(path, sizeof(path), "%s/%s/book.md", kBooks, b.slug);
-  FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_TRUNC);
-  if (f) {
-    char meta[192];
-    const int len = snprintf(meta, sizeof(meta), "---\ntitle: %s\n---\n\n", b.title);
-    if (len > 0) f.write((const uint8_t*)meta, (size_t)len);
-    f.sync();
-    f.close();
-  } else {
-    // Not fatal: a book without metadata still opens, it just shows its slug.
-    Serial.println("[book] warning: could not write book.md");
-  }
+  // The title as typed, so the slug's lost umlauts and capitals survive.
+  writeBookMeta(b.slug, title);
+  bookTitleFor(b.slug, b.title, sizeof(b.title));
 
   *out = b;
   Serial.printf("[book] created %s (%s)\n", dir, b.title);
