@@ -261,6 +261,24 @@ bool Storage::createChapter(const char* title, Chapter* out) {
   return true;
 }
 
+bool Storage::chapterHead(const Chapter& ch, char* out, uint32_t outSize) {
+  if (!out || outSize == 0) return false;
+  out[0] = 0;
+  if (!mounted_) return false;
+  auto& sd = SDCardManager::getInstance();
+  char path[160];
+  chapterPath(ch, path, sizeof(path));
+  if (!sd.exists(path)) return false;
+
+  FsFile f = sd.open(path, O_RDONLY);
+  if (!f) return false;
+  const int got = f.read((uint8_t*)out, outSize - 1);
+  f.close();
+  if (got <= 0) return false;
+  out[got] = 0;
+  return true;
+}
+
 bool Storage::loadChapter(Document& doc, const Chapter& ch) {
   if (!mounted_) return fail("not mounted");
   auto& sd = SDCardManager::getInstance();

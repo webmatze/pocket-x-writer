@@ -48,6 +48,10 @@ class Storage {
   uint16_t listChapters(Chapter* out, uint16_t max);
 
   bool loadChapter(Document& doc, const Chapter& ch);
+  // Read the opening bytes of a chapter, enough for core/menu.h's chapterLabel()
+  // to derive a display name. Loading whole chapters just to show a list would
+  // mean reading megabytes to draw one screen.
+  bool chapterHead(const Chapter& ch, char* out, uint32_t outSize);
   bool saveChapter(const Document& doc, const Chapter& ch);
   // Create the next chapter after the highest existing number.
   bool createChapter(const char* title, Chapter* out);

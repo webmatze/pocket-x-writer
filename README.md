@@ -76,6 +76,7 @@ full evidence.
 | `Ctrl`+`←`/`→` | move by word |
 | `Ctrl+Home` / `Ctrl+End` | jump to the start / end of the chapter |
 | `Ctrl+Backspace` | delete previous word |
+| `Esc` | chapter list — again to leave it |
 | `PageUp` / `PageDown` | previous / next chapter |
 | `Ctrl+N` | new chapter |
 | `Ctrl+U` | mount the SD card on your computer |
@@ -88,6 +89,8 @@ switch on the keyboard.
 | | |
 |---|---|
 | **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
+| **Left** (hold ~0.6 s) | open the chapter list — in the list: open the selected chapter |
+| **Left** (short, in the list) | next entry (wraps) |
 | **Right** (hold 2 s) | reboot into the other firmware slot — **one way**, see below |
 | **Power** (short press) | sleep now — saves first, then shows a sleep screen |
 | **Power** (while asleep) | wake |

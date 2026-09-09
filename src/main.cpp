@@ -33,6 +33,7 @@
 #include "storage.h"
 
 #include "core/document.h"
+#include "core/menu.h"
 #include "core/project.h"
 #include "core/text_render.h"
 #include "fonts/NotoSans261bpp.h"
@@ -415,6 +416,95 @@ void newChapter() {
     if (gChapters[i].number == c.number) { openChapter(i); return; }
 }
 
+// --- the on-device overlay ---------------------------------------------------
+//
+// A MODE, not a blocking loop. Keys route here and the overlay is drawn in place
+// of the page, while autosave, the sleep timer, the BLE poll and the buttons all
+// keep running exactly as before -- the same shape gUsbMode already uses. A
+// `while` loop here would switch all of that off silently, and the first symptom
+// would be a device that never sleeps while a menu is open.
+
+enum class Overlay : uint8_t { None, Chapters };
+Overlay gOverlay = Overlay::None;
+pocketx::ListState gList;
+
+// Labels are read once when the picker opens, never per redraw. Sixty-four
+// chapters is sixty-four small file reads -- nothing beside a panel refresh, but
+// not something to repeat on every frame either.
+constexpr uint32_t kLabelLen = 48;
+char gLabels[pocketx::Storage::kMaxChapters][kLabelLen];
+
+// Long enough not to fire on a frontlight tap, short enough not to feel stuck.
+constexpr uint32_t kLongPressMs = 600;
+
+void wakeOverlay() {
+  gDirty = true;
+  gForceFullRefresh = true;      // a modal changes the whole page; damage tracking has nothing to add
+  gLastActivityAt = millis();
+  if (!gPendingSince) gPendingSince = millis();
+}
+
+void closeOverlay() {
+  if (gOverlay == Overlay::None) return;
+  gOverlay = Overlay::None;
+  gStatusStale = true;
+  wakeOverlay();
+}
+
+void openChapterPicker() {
+  if (!gChapterCount) return;
+  for (uint16_t i = 0; i < gChapterCount; ++i) {
+    char head[256];
+    const char* src = nullptr;
+    // The open chapter is labelled from the buffer, not the card, so a title
+    // typed a moment ago is what the list shows.
+    if (i == gChapterIndex) src = gDoc->text();
+    else if (gStorage.chapterHead(gChapters[i], head, sizeof(head))) src = head;
+
+    if (!src || !pocketx::chapterLabel(src, gLabels[i], kLabelLen))
+      snprintf(gLabels[i], kLabelLen, "Kapitel %u", (unsigned)gChapters[i].number);
+  }
+  const uint16_t rows = (uint16_t)((kH - kTextTop - 40) / kFont.yAdvance);
+  gList.reset(gChapterCount, gChapterIndex, rows);
+  gOverlay = Overlay::Chapters;
+  wakeOverlay();
+}
+
+void overlayConfirm() {
+  if (gOverlay != Overlay::Chapters) return;
+  const uint16_t pick = (uint16_t)gList.selected();
+  closeOverlay();
+  // openChapter() saves the current chapter first, so a switch cannot lose work.
+  if (pick != gChapterIndex) openChapter(pick);
+}
+
+void drawOverlay(uint8_t* fb) {
+  const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
+  memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+
+  char title[64];
+  snprintf(title, sizeof(title), "Kapitel  %u/%u", (unsigned)(gList.selected() + 1),
+           (unsigned)gList.count());
+  pocketx::drawText(canvas, kFont, kMargin, 34, title);
+  pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
+
+  int32_t y = kTextTop + kFont.ascent;
+  const uint32_t last = gList.firstVisible() + gList.visibleRows();
+  for (uint32_t i = gList.firstVisible(); i < gList.count() && i < last; ++i) {
+    char row[96];
+    snprintf(row, sizeof(row), "%2u   %s", (unsigned)gChapters[i].number, gLabels[i]);
+    pocketx::drawText(canvas, kFont, kMargin + 12, y, row);
+    // Selection is drawn the way the editor draws one: ink first, then invert.
+    if (i == gList.selected())
+      pocketx::invertRect(canvas, pocketx::Rect{kMargin, y - kFont.ascent,
+                                                (int32_t)kTextWidth, kFont.yAdvance - 2});
+    y += kFont.yAdvance;
+  }
+
+  pocketx::drawText(canvas, kFont, kMargin, kH - 12,
+                    "Enter öffnet · Esc zurück · Links: weiter / lang öffnen");
+}
+
 // Hand the SD card to the Mac over the same USB-C cable that powers the device.
 // Everything is drawn BEFORE the filesystem is detached, because afterwards the
 // card belongs to the host and any access from here would race it.
@@ -487,17 +577,39 @@ void applyLight() {
   Serial.printf("[light] %u%%\n", kLightSteps[gLightStep]);
 }
 
+// The Left key carries two gestures so the menu is reachable with no keyboard
+// attached -- the one case where a keyboard chord would be useless, since the
+// menu is where you go to pair one. Nothing else changes meaning: Right stays
+// the slot switch, Power stays sleep, and a short Left press is still the
+// frontlight, which you want available in a dark menu.
 void pollLightButton() {
   static bool wasDown = false;
   static uint32_t downAt = 0;
+  static bool longFired = false;
   const bool down = digitalRead(kLightButton) == LOW;
   const uint32_t now = millis();
-  if (down && !wasDown) {
-    downAt = now;
-  } else if (!down && wasDown && now - downAt > 30) {   // debounce
-    gLightStep = (uint8_t)((gLightStep + 1) % (sizeof(kLightSteps) / sizeof(kLightSteps[0])));
-    applyLight();
+
+  if (down && !wasDown) { downAt = now; longFired = false; }
+
+  // Act while the key is still down, so the long press answers at the moment the
+  // threshold passes rather than on release -- on a panel this slow, waiting for
+  // the release reads as the device having missed the press.
+  if (down && !longFired && now - downAt >= kLongPressMs) {
+    longFired = true;
+    if (gOverlay != Overlay::None) overlayConfirm();
+    else openChapterPicker();
   }
+
+  if (!down && wasDown && !longFired && now - downAt > 30) {   // debounce
+    if (gOverlay != Overlay::None) {
+      gList.next();
+      wakeOverlay();
+    } else {
+      gLightStep = (uint8_t)((gLightStep + 1) % (sizeof(kLightSteps) / sizeof(kLightSteps[0])));
+      applyLight();
+    }
+  }
+  if (down) gLastActivityAt = now;
   wasDown = down;
 }
 
@@ -901,6 +1013,26 @@ void loop() {
     // Ctrl+S saves immediately.
     if (gUsbMode) continue;                   // the card belongs to the host now
 
+    if (gOverlay != Overlay::None) {
+      switch (ev.special) {
+        case freeink::SpecialKey::Up:       gList.prev();     break;
+        case freeink::SpecialKey::Down:     gList.next();     break;
+        case freeink::SpecialKey::PageUp:   gList.pagePrev(); break;
+        case freeink::SpecialKey::PageDown: gList.pageNext(); break;
+        case freeink::SpecialKey::Home:     gList.moveTo(0);  break;
+        case freeink::SpecialKey::End:      gList.moveTo(gList.count() - 1); break;
+        case freeink::SpecialKey::Enter:    overlayConfirm(); continue;
+        case freeink::SpecialKey::Escape:   closeOverlay();   continue;
+        default: continue;                  // ignore text while the list is up
+      }
+      wakeOverlay();
+      continue;
+    }
+    // Escape opens the chapter list. It is unbound otherwise, it is the
+    // universal "step out", and it needs no modifier -- which matters, because
+    // this is the one door that must also open without a keyboard.
+    if (ev.special == freeink::SpecialKey::Escape) { openChapterPicker(); continue; }
+
     if (ctrl && ev.keycode == 0x18) {          // Ctrl+U: USB transfer
       enterUsbTransfer();
       continue;
@@ -1008,7 +1140,8 @@ void loop() {
     }
     const char* status = gStatusText;
     uint8_t* fb = display.getFrameBuffer();
-    redraw(fb, status);
+    if (gOverlay != Overlay::None) drawOverlay(fb);
+    else redraw(fb, status);
 
     // What actually changed on screen? Comparing frames is cheaper than a panel
     // refresh by orders of magnitude, and it catches the common case where a
