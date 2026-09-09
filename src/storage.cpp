@@ -8,6 +8,7 @@
 #include <Rtc.h>
 
 #include "core/project.h"
+#include "core/frontmatter.h"
 #include "core/slug.h"
 
 namespace pocketx {
@@ -178,9 +179,41 @@ namespace {
 constexpr const char* kBooks = "/books";
 }  // namespace
 
-bool Storage::openBook(const char* bookTitle) {
+namespace {
+
+// Read a book's metadata file. Only the head is read: book.md may carry free
+// notes below the block, and none of them are ours.
+bool readBookMeta(const char* slug, char* out, uint32_t outSize) {
+  auto& sd = SDCardManager::getInstance();
+  char path[128];
+  snprintf(path, sizeof(path), "%s/%s/book.md", kBooks, slug);
+  if (!sd.exists(path)) return false;
+  FsFile f = sd.open(path, O_RDONLY);
+  if (!f) return false;
+  const int got = f.read((uint8_t*)out, outSize - 1);
+  f.close();
+  if (got <= 0) return false;
+  out[got] = 0;
+  return true;
+}
+
+// Title of the book in `slug`, falling back to the directory name. A book whose
+// metadata is missing or damaged is still a book -- that rule is why this
+// returns void rather than a success flag.
+void bookTitleFor(const char* slug, char* out, uint32_t outSize) {
+  char head[512];
+  if (readBookMeta(slug, head, sizeof(head)) &&
+      frontmatterValue(head, "title", out, outSize))
+    return;
+  snprintf(out, outSize, "%s", slug);
+}
+
+}  // namespace
+
+bool Storage::openBookBySlug(const char* slug) {
   if (!mounted_) return fail("not mounted");
-  slugify(bookTitle, book_, sizeof(book_), "buch");
+  if (!slug || !*slug) return fail("no book given");
+  snprintf(book_, sizeof(book_), "%s", slug);
 
   auto& sd = SDCardManager::getInstance();
   char dir[96];
@@ -190,7 +223,93 @@ bool Storage::openBook(const char* bookTitle) {
   snprintf(dir, sizeof(dir), "%s/%s/chapters", kBooks, book_);
   if (!sd.exists(dir) && !sd.mkdir(dir)) return fail("cannot create chapters directory");
 
-  Serial.printf("[book] %s ready\n", dir);
+  bookTitleFor(book_, title_, sizeof(title_));
+  Serial.printf("[book] %s ready (%s)\n", dir, title_);
+  return true;
+}
+
+bool Storage::openBook(const char* bookTitle) {
+  char slug[48];
+  slugify(bookTitle, slug, sizeof(slug), "buch");
+  return openBookBySlug(slug);
+}
+
+uint16_t Storage::listBooks(Book* out, uint16_t max) {
+  if (!mounted_ || !out || !max) return 0;
+  auto& sd = SDCardManager::getInstance();
+  if (!sd.exists(kBooks)) return 0;
+
+  FsFile dir = sd.open(kBooks, O_RDONLY);
+  if (!dir) return 0;
+
+  uint16_t n = 0;
+  FsFile f;
+  while (n < max && f.openNext(&dir, O_RDONLY)) {
+    char name[64] = {0};
+    f.getName(name, sizeof(name));
+    const bool isDir = f.isDir();
+    f.close();
+    if (!isDir || name[0] == '.') continue;   // skip .Trashes and friends
+
+    Book b;
+    snprintf(b.slug, sizeof(b.slug), "%s", name);
+    bookTitleFor(b.slug, b.title, sizeof(b.title));
+    out[n++] = b;
+  }
+  dir.close();
+
+  // Sort by title, so the list reads the way the writer thinks of it rather
+  // than the way the card happens to hand the directories back.
+  for (uint16_t i = 1; i < n; ++i)
+    for (uint16_t j = i; j > 0 && strcasecmp(out[j].title, out[j - 1].title) < 0; --j) {
+      const Book t = out[j]; out[j] = out[j - 1]; out[j - 1] = t;
+    }
+  return n;
+}
+
+bool Storage::createBook(const char* title, Book* out) {
+  if (!mounted_ || !out) return fail("not mounted");
+
+  Book b;
+  slugify(title, b.slug, sizeof(b.slug), "buch");
+
+  auto& sd = SDCardManager::getInstance();
+  char dir[96];
+  if (!sd.exists(kBooks) && !sd.mkdir(kBooks)) return fail("cannot create /books");
+  snprintf(dir, sizeof(dir), "%s/%s", kBooks, b.slug);
+  if (sd.exists(dir)) return fail("a book of that name already exists");
+  if (!sd.mkdir(dir)) return fail("cannot create book directory");
+
+  char chapters[128];
+  snprintf(chapters, sizeof(chapters), "%s/%s/chapters", kBooks, b.slug);
+  if (!sd.mkdir(chapters)) return fail("cannot create chapters directory");
+
+  // The title as typed, so the slug's lost umlauts and capitals survive
+  // somewhere. Newlines are stripped: one of them in the frontmatter block
+  // would turn the rest of the file into something else entirely.
+  char clean[64];
+  uint32_t w = 0;
+  for (const char* p = title; *p && w + 1 < sizeof(clean); ++p)
+    if (*p != '\n' && *p != '\r') clean[w++] = *p;
+  clean[w] = 0;
+  snprintf(b.title, sizeof(b.title), "%s", w ? clean : b.slug);
+
+  char path[128];
+  snprintf(path, sizeof(path), "%s/%s/book.md", kBooks, b.slug);
+  FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_TRUNC);
+  if (f) {
+    char meta[192];
+    const int len = snprintf(meta, sizeof(meta), "---\ntitle: %s\n---\n\n", b.title);
+    if (len > 0) f.write((const uint8_t*)meta, (size_t)len);
+    f.sync();
+    f.close();
+  } else {
+    // Not fatal: a book without metadata still opens, it just shows its slug.
+    Serial.println("[book] warning: could not write book.md");
+  }
+
+  *out = b;
+  Serial.printf("[book] created %s (%s)\n", dir, b.title);
   return true;
 }
 

@@ -1,0 +1,139 @@
+#include <unity.h>
+#include <string.h>
+
+#include "core/frontmatter.h"
+
+using namespace pocketx;
+
+void setUp() {}
+void tearDown() {}
+
+static const char* kBook =
+    "---\n"
+    "title: Über den Dächern\n"
+    "goal: 1000\n"
+    "author: Mathias\n"
+    "---\n"
+    "\n"
+    "Freie Notizen, die uns nichts angehen.\n";
+
+void test_reads_a_value() {
+  char b[64];
+  TEST_ASSERT_TRUE(frontmatterValue(kBook, "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Über den Dächern", b);
+  TEST_ASSERT_TRUE(frontmatterValue(kBook, "goal", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("1000", b);
+}
+
+void test_key_matching_ignores_case() {
+  char b[64];
+  TEST_ASSERT_TRUE(frontmatterValue(kBook, "TITLE", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Über den Dächern", b);
+}
+
+void test_absent_key_is_not_an_error() {
+  char b[64];
+  TEST_ASSERT_FALSE(frontmatterValue(kBook, "genre", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("", b);
+}
+
+// A key must match in full: "tit" is not "title", and "titlepage" is not either.
+void test_key_must_match_completely() {
+  char b[64];
+  TEST_ASSERT_FALSE(frontmatterValue(kBook, "tit", b, sizeof(b)));
+  TEST_ASSERT_FALSE(frontmatterValue(kBook, "titlepage", b, sizeof(b)));
+}
+
+void test_body_below_the_block_is_ignored() {
+  char b[64];
+  const char* t = "---\ntitle: Echt\n---\ntitle: Falsch\n";
+  TEST_ASSERT_TRUE(frontmatterValue(t, "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Echt", b);
+}
+
+// Everything after the FIRST colon belongs to the value -- book titles contain
+// colons more often than not.
+void test_value_may_contain_a_colon() {
+  char b[64];
+  const char* t = "---\ntitle: Der Fall: Ein Roman\n---\n";
+  TEST_ASSERT_TRUE(frontmatterValue(t, "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Der Fall: Ein Roman", b);
+}
+
+void test_surrounding_quotes_are_dropped() {
+  char b[64];
+  TEST_ASSERT_TRUE(frontmatterValue("---\ntitle: \"Zitiert\"\n---\n", "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Zitiert", b);
+  TEST_ASSERT_TRUE(frontmatterValue("---\ntitle: 'Einfach'\n---\n", "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Einfach", b);
+}
+
+void test_whitespace_around_key_and_value_is_trimmed() {
+  char b[64];
+  TEST_ASSERT_TRUE(frontmatterValue("---\n   title  :   Luftig   \n---\n", "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Luftig", b);
+}
+
+void test_blank_lines_above_the_fence_are_tolerated() {
+  char b[64];
+  TEST_ASSERT_TRUE(frontmatterValue("\n\n---\ntitle: Spaet\n---\n", "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Spaet", b);
+}
+
+// The governing rule: a damaged file loses a value, never a book.
+void test_damage_costs_a_value_not_the_book() {
+  char b[64];
+  TEST_ASSERT_FALSE(frontmatterValue("", "title", b, sizeof(b)));
+  TEST_ASSERT_FALSE(frontmatterValue(nullptr, "title", b, sizeof(b)));
+  TEST_ASSERT_FALSE(frontmatterValue("kein Frontmatter hier\n", "title", b, sizeof(b)));
+  TEST_ASSERT_FALSE(frontmatterValue("---\ntitle:\n---\n", "title", b, sizeof(b)));
+  TEST_ASSERT_FALSE(frontmatterValue("---\nMuell ohne Doppelpunkt\n---\n", "title", b, sizeof(b)));
+  // An unterminated block still yields what it holds.
+  TEST_ASSERT_TRUE(frontmatterValue("---\ntitle: Offen\n", "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Offen", b);
+}
+
+void test_a_broken_line_does_not_hide_the_next_one() {
+  char b[64];
+  const char* t = "---\nkaputt\ngoal: 500\ntitle: Da\n---\n";
+  TEST_ASSERT_TRUE(frontmatterValue(t, "title", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("Da", b);
+  TEST_ASSERT_TRUE(frontmatterValue(t, "goal", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("500", b);
+}
+
+void test_truncation_never_splits_a_utf8_character() {
+  for (uint32_t size = 4; size <= 24; ++size) {
+    char b[32];
+    frontmatterValue(kBook, "title", b, size);
+    uint32_t i = 0;
+    const uint32_t n = (uint32_t)strlen(b);
+    TEST_ASSERT_TRUE(n < size);
+    while (i < n) {
+      const unsigned char c = (unsigned char)b[i];
+      uint32_t len = 1;
+      if ((c & 0xE0) == 0xC0) len = 2;
+      else if ((c & 0xF0) == 0xE0) len = 3;
+      else if ((c & 0xF8) == 0xF0) len = 4;
+      TEST_ASSERT_TRUE_MESSAGE(i + len <= n, "UTF-8 sequence runs past the end");
+      i += len;
+    }
+  }
+}
+
+int main(int, char**) {
+  UNITY_BEGIN();
+  RUN_TEST(test_reads_a_value);
+  RUN_TEST(test_key_matching_ignores_case);
+  RUN_TEST(test_absent_key_is_not_an_error);
+  RUN_TEST(test_key_must_match_completely);
+  RUN_TEST(test_body_below_the_block_is_ignored);
+  RUN_TEST(test_value_may_contain_a_colon);
+  RUN_TEST(test_surrounding_quotes_are_dropped);
+  RUN_TEST(test_whitespace_around_key_and_value_is_trimmed);
+  RUN_TEST(test_blank_lines_above_the_fence_are_tolerated);
+  RUN_TEST(test_damage_costs_a_value_not_the_book);
+  RUN_TEST(test_a_broken_line_does_not_hide_the_next_one);
+  RUN_TEST(test_truncation_never_splits_a_utf8_character);
+  return UNITY_END();
+}

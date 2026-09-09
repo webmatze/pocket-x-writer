@@ -15,6 +15,12 @@
 
 namespace pocketx {
 
+// One book directory on the card.
+struct Book {
+  char slug[48] = {0};    // directory name under /books
+  char title[64] = {0};   // from book.md, or the slug when there is none
+};
+
 // One chapter file on the card.
 struct Chapter {
   uint16_t number = 0;
@@ -33,6 +39,7 @@ class Storage {
   static void useRtcForTimestamps();
 
   static constexpr uint16_t kMaxChapters = 64;
+  static constexpr uint16_t kMaxBooks = 32;
 
   bool begin();
   bool mounted() const { return mounted_; }
@@ -41,7 +48,20 @@ class Storage {
   // Chapters live at /books/<book>/chapters/NN-slug.md, the layout the
   // book-writer tooling reads, so no conversion is needed on the Mac.
   bool openBook(const char* bookTitle);
+  // Open a book by its directory name. Unlike openBook() this does NOT slugify:
+  // a slug that has been through slugify() twice is still itself, but a name
+  // read off the card is already the thing on disk and must not be reshaped.
+  bool openBookBySlug(const char* slug);
   const char* bookSlug() const { return book_; }
+  const char* bookTitle() const { return title_; }
+
+  // Books found under /books, sorted by title. Directories without a readable
+  // book.md still count -- a folder made on the Mac is a book too, it just
+  // shows its directory name.
+  uint16_t listBooks(Book* out, uint16_t max);
+  // Create a book directory and its book.md. Fails when it already exists, so a
+  // second book of the same name cannot quietly adopt the first one's chapters.
+  bool createBook(const char* title, Book* out);
 
   // Fill `out` with the chapters found, sorted by number. Returns how many.
   // Files that do not parse as chapters are skipped rather than guessed at.
@@ -78,6 +98,7 @@ class Storage {
   void chapterPath(const Chapter& ch, char* out, uint32_t outSize, const char* ext = "") const;
   bool mounted_ = false;
   char book_[48] = {0};
+  char title_[64] = {0};
   const char* err_ = "";
 };
 

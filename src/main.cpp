@@ -424,9 +424,29 @@ void newChapter() {
 // `while` loop here would switch all of that off silently, and the first symptom
 // would be a device that never sleeps while a menu is open.
 
-enum class Overlay : uint8_t { None, Chapters };
+enum class Overlay : uint8_t { None, Menu, Chapters, Books, Prompt };
 Overlay gOverlay = Overlay::None;
 pocketx::ListState gList;
+
+// The menu is the level above a single book. Kept as a plain array because it
+// is fixed: entries appear here when they exist, not before.
+const char* const kMenuItems[] = {"Kapitel ...", "Bücher ..."};
+constexpr uint16_t kMenuCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
+
+pocketx::Book gBooks[pocketx::Storage::kMaxBooks];
+uint16_t gBookCount = 0;
+
+// A one-line text field, for the things that cannot name themselves. A chapter
+// can be labelled by its first line; an empty book has nothing to derive a name
+// from, so books are the reason this exists.
+//
+// It is a Document, not a new text editor: cursor handling on UTF-8 boundaries,
+// backspace and word deletion are already written and already tested.
+enum class PromptFor : uint8_t { None, NewBook };
+PromptFor gPromptFor = PromptFor::None;
+char gPromptStorage[128];
+pocketx::Document gPrompt(gPromptStorage, sizeof(gPromptStorage));
+const char* gPromptTitle = "";
 
 // Labels are read once when the picker opens, never per redraw. Sixty-four
 // chapters is sixty-four small file reads -- nothing beside a panel refresh, but
@@ -443,6 +463,8 @@ void wakeOverlay() {
   gLastActivityAt = millis();
   if (!gPendingSince) gPendingSince = millis();
 }
+
+uint16_t overlayRows() { return (uint16_t)((kH - kTextTop - 40) / kFont.yAdvance); }
 
 void closeOverlay() {
   if (gOverlay == Overlay::None) return;
@@ -464,27 +486,178 @@ void openChapterPicker() {
     if (!src || !pocketx::chapterLabel(src, gLabels[i], kLabelLen))
       snprintf(gLabels[i], kLabelLen, "Kapitel %u", (unsigned)gChapters[i].number);
   }
-  const uint16_t rows = (uint16_t)((kH - kTextTop - 40) / kFont.yAdvance);
-  gList.reset(gChapterCount, gChapterIndex, rows);
+  gList.reset(gChapterCount, gChapterIndex, overlayRows());
   gOverlay = Overlay::Chapters;
   wakeOverlay();
 }
 
-void overlayConfirm() {
-  if (gOverlay != Overlay::Chapters) return;
-  const uint16_t pick = (uint16_t)gList.selected();
+void openMenu() {
+  gList.reset(kMenuCount, 0, overlayRows());
+  gOverlay = Overlay::Menu;
+  wakeOverlay();
+}
+
+void openPrompt(const char* title, PromptFor purpose) {
+  gPrompt.clear();
+  gPromptTitle = title;
+  gPromptFor = purpose;
+  gOverlay = Overlay::Prompt;
+  wakeOverlay();
+}
+
+void openBookPicker() {
+  gBookCount = gStorage.listBooks(gBooks, pocketx::Storage::kMaxBooks);
+  uint16_t here = 0;
+  for (uint16_t i = 0; i < gBookCount; ++i)
+    if (strcmp(gBooks[i].slug, gStorage.bookSlug()) == 0) here = i;
+  // One entry past the end is "new book": the list and the way to add to it are
+  // the same gesture, so there is nothing else to discover.
+  gList.reset((uint32_t)gBookCount + 1, here, overlayRows());
+  gOverlay = Overlay::Books;
+  wakeOverlay();
+}
+
+// Reopen whatever book was last in use. The remembered slug is checked against
+// what is actually on the card first: a folder renamed or deleted on the Mac
+// must fall back to the default book, not silently recreate itself empty --
+// openBookBySlug() creates what is missing, which is right when you picked the
+// book and wrong when the card has moved on without you.
+bool openLastBook() {
+  char slug[48] = {0};
+  gPrefs.getString("book", slug, sizeof(slug));
+  if (slug[0]) {
+    gBookCount = gStorage.listBooks(gBooks, pocketx::Storage::kMaxBooks);
+    for (uint16_t i = 0; i < gBookCount; ++i)
+      if (strcmp(gBooks[i].slug, slug) == 0) return gStorage.openBookBySlug(slug);
+    Serial.printf("[book] remembered book '%s' is gone; falling back\n", slug);
+  }
+  return gStorage.openBook(kBookTitle);
+}
+
+// Switch books. The save has to happen BEFORE the book changes, or it would be
+// written through the new book's paths -- into a chapter file that belongs to a
+// different book.
+void switchToBook(uint16_t index) {
+  if (index >= gBookCount) return;
+  if (gDoc->dirty()) saveCurrentChapter();
+  if (!gStorage.openBookBySlug(gBooks[index].slug)) return;
+  gPrefs.putString("book", gBooks[index].slug);
+
+  gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
+  if (gChapterCount == 0) {
+    pocketx::Chapter c;
+    if (gStorage.createChapter("", &c))
+      gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
+  }
+  gChapterIndex = 0;
+  if (gChapterCount) {
+    openChapter(0);          // the document is clean by now, so this cannot re-save
+  } else {
+    gDoc->clear();
+    gDoc->markClean();
+    gScrollByte = 0;
+  }
+  gForceFullRefresh = true;
+  gStatusStale = true;
+}
+
+void promptConfirm() {
+  const PromptFor purpose = gPromptFor;
+  char text[128];
+  const uint32_t n = gPrompt.size() < sizeof(text) - 1 ? gPrompt.size() : sizeof(text) - 1;
+  memcpy(text, gPrompt.text(), n);
+  text[n] = 0;
+  gPromptFor = PromptFor::None;
+
+  if (purpose == PromptFor::NewBook && n) {
+    pocketx::Book b;
+    if (!gStorage.createBook(text, &b)) {
+      // Stay in the field with the text intact. Dropping what was just typed
+      // and closing without a word is the worst of both -- the writer would not
+      // even learn that the name was taken.
+      gPromptTitle = "Name schon vergeben - anderer Titel:";
+      gPromptFor = purpose;
+      wakeOverlay();
+      return;
+    }
+    gBookCount = gStorage.listBooks(gBooks, pocketx::Storage::kMaxBooks);
+    for (uint16_t i = 0; i < gBookCount; ++i)
+      if (strcmp(gBooks[i].slug, b.slug) == 0) { closeOverlay(); switchToBook(i); return; }
+  }
   closeOverlay();
-  // openChapter() saves the current chapter first, so a switch cannot lose work.
-  if (pick != gChapterIndex) openChapter(pick);
+}
+
+void overlayConfirm() {
+  switch (gOverlay) {
+    case Overlay::Menu: {
+      const uint32_t pick = gList.selected();
+      if (pick == 0) { if (gChapterCount) openChapterPicker(); }
+      else openBookPicker();
+      break;
+    }
+    case Overlay::Chapters: {
+      const uint16_t pick = (uint16_t)gList.selected();
+      closeOverlay();
+      // openChapter() saves the current chapter first, so a switch cannot lose work.
+      if (pick != gChapterIndex) openChapter(pick);
+      break;
+    }
+    case Overlay::Books: {
+      const uint32_t pick = gList.selected();
+      if (pick >= gBookCount) { openPrompt("Neues Buch - Titel:", PromptFor::NewBook); break; }
+      closeOverlay();
+      if (strcmp(gBooks[pick].slug, gStorage.bookSlug()) != 0) switchToBook((uint16_t)pick);
+      break;
+    }
+    case Overlay::Prompt: promptConfirm(); break;
+    default: break;
+  }
+}
+
+void drawPrompt(const pocketx::Canvas& canvas) {
+  pocketx::drawText(canvas, kFont, kMargin, 34, gPromptTitle);
+  pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
+
+  char buf[160];
+  const uint32_t n = gPrompt.size() < sizeof(buf) - 1 ? gPrompt.size() : sizeof(buf) - 1;
+  memcpy(buf, gPrompt.text(), n);
+  buf[n] = 0;
+
+  const int32_t y = kTextTop + 60 + kFont.ascent;
+  pocketx::drawText(canvas, kFont, kMargin, y, buf);
+  pocketx::fillRect(canvas, pocketx::Rect{kMargin, y + 12, (int32_t)kTextWidth, 1}, true);
+
+  // Same caret as the editor draws, for the same reason: a hairline disappears
+  // into ghost residue on this panel.
+  const uint32_t cur = gPrompt.cursor() < n ? gPrompt.cursor() : n;
+  buf[cur] = 0;
+  const int32_t x = kMargin + (int32_t)pocketx::measureText(kFont, buf);
+  pocketx::fillRect(canvas, pocketx::Rect{x + 1, y - kFont.ascent + 3, 5, kFont.ascent - 1}, true);
+
+  pocketx::drawText(canvas, kFont, kMargin, kH - 12, "Enter bestätigt · Esc bricht ab");
 }
 
 void drawOverlay(uint8_t* fb) {
   const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
   memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
+  if (gOverlay == Overlay::Prompt) { drawPrompt(canvas); return; }
 
-  char title[64];
-  snprintf(title, sizeof(title), "Kapitel  %u/%u", (unsigned)(gList.selected() + 1),
-           (unsigned)gList.count());
+  char title[96];
+  switch (gOverlay) {
+    case Overlay::Menu:
+      snprintf(title, sizeof(title), "%s", gStorage.bookTitle());
+      break;
+    case Overlay::Books:
+      snprintf(title, sizeof(title), "Bücher  %u", (unsigned)gBookCount);
+      break;
+    default:
+      // The book belongs here rather than in the status line: this is the moment
+      // you are navigating, and the status line has no room to spare without
+      // clipping the save state off its right end.
+      snprintf(title, sizeof(title), "%s · Kapitel %u/%u", gStorage.bookTitle(),
+               (unsigned)(gList.selected() + 1), (unsigned)gList.count());
+      break;
+  }
   pocketx::drawText(canvas, kFont, kMargin, 34, title);
   pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
 
@@ -492,7 +665,22 @@ void drawOverlay(uint8_t* fb) {
   const uint32_t last = gList.firstVisible() + gList.visibleRows();
   for (uint32_t i = gList.firstVisible(); i < gList.count() && i < last; ++i) {
     char row[96];
-    snprintf(row, sizeof(row), "%2u   %s", (unsigned)gChapters[i].number, gLabels[i]);
+    switch (gOverlay) {
+      case Overlay::Menu:
+        snprintf(row, sizeof(row), "%s", kMenuItems[i]);
+        break;
+      case Overlay::Books:
+        if (i < gBookCount) {
+          snprintf(row, sizeof(row), "%s%s", gBooks[i].title,
+                   strcmp(gBooks[i].slug, gStorage.bookSlug()) == 0 ? "   (offen)" : "");
+        } else {
+          snprintf(row, sizeof(row), "+  Neues Buch ...");
+        }
+        break;
+      default:
+        snprintf(row, sizeof(row), "%2u   %s", (unsigned)gChapters[i].number, gLabels[i]);
+        break;
+    }
     pocketx::drawText(canvas, kFont, kMargin + 12, y, row);
     // Selection is drawn the way the editor draws one: ink first, then invert.
     if (i == gList.selected())
@@ -596,12 +784,15 @@ void pollLightButton() {
   // the release reads as the device having missed the press.
   if (down && !longFired && now - downAt >= kLongPressMs) {
     longFired = true;
-    if (gOverlay != Overlay::None) overlayConfirm();
-    else openChapterPicker();
+    // In a text prompt there is nothing a button can confirm -- you cannot type
+    // a title without a keyboard -- so the long press is the way out instead.
+    if (gOverlay == Overlay::Prompt) closeOverlay();
+    else if (gOverlay != Overlay::None) overlayConfirm();
+    else openMenu();
   }
 
   if (!down && wasDown && !longFired && now - downAt > 30) {   // debounce
-    if (gOverlay != Overlay::None) {
+    if (gOverlay != Overlay::None && gOverlay != Overlay::Prompt) {
       gList.next();
       wakeOverlay();
     } else {
@@ -905,8 +1096,9 @@ void setup() {
                 (unsigned long)(kDocCapacity / 1024), (unsigned long)(kUndoArena / 1024),
                 docBuf ? "ok" : "ALLOCATION FAILED");
 
+  gPrefs.begin("pocketx", false);
   pocketx::Storage::useRtcForTimestamps();
-  if (gStorage.begin() && gStorage.openBook(kBookTitle)) {
+  if (gStorage.begin() && openLastBook()) {
     gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
     if (gChapterCount == 0) {
       pocketx::Chapter c;
@@ -926,7 +1118,6 @@ void setup() {
 
   pinMode(kLightButton, INPUT_PULLUP);
   pinMode(kPowerButton, INPUT_PULLUP);
-  gPrefs.begin("pocketx", false);
   gLight.begin();
   gLightStep = gPrefs.getUChar("light", 0);
   if (gLightStep >= sizeof(kLightSteps) / sizeof(kLightSteps[0])) gLightStep = 0;
@@ -1013,6 +1204,31 @@ void loop() {
     // Ctrl+S saves immediately.
     if (gUsbMode) continue;                   // the card belongs to the host now
 
+    if (gOverlay == Overlay::Prompt) {
+      switch (ev.special) {
+        case freeink::SpecialKey::Enter:     overlayConfirm(); continue;
+        case freeink::SpecialKey::Escape:    closeOverlay();   continue;
+        case freeink::SpecialKey::Backspace:
+          ctrl ? gPrompt.deleteWordBefore() : gPrompt.backspace(); break;
+        case freeink::SpecialKey::Delete:    gPrompt.deleteForward(); break;
+        case freeink::SpecialKey::Left:      gPrompt.moveLeft(shift);  break;
+        case freeink::SpecialKey::Right:     gPrompt.moveRight(shift); break;
+        case freeink::SpecialKey::Home:      gPrompt.moveToStart(shift); break;
+        case freeink::SpecialKey::End:       gPrompt.moveToEnd(shift);   break;
+        case freeink::SpecialKey::None: {
+          if (ctrl) break;
+          pocketx::KeyText txt;
+          if (!pocketx::deTranslate(ev.keycode, ev.mods, gDead, txt)) break;
+          if (txt.consumedAsDead) break;
+          gPrompt.insert(txt.utf8, txt.len);
+          break;
+        }
+        default: break;
+      }
+      wakeOverlay();
+      continue;
+    }
+
     if (gOverlay != Overlay::None) {
       switch (ev.special) {
         case freeink::SpecialKey::Up:       gList.prev();     break;
@@ -1028,10 +1244,10 @@ void loop() {
       wakeOverlay();
       continue;
     }
-    // Escape opens the chapter list. It is unbound otherwise, it is the
-    // universal "step out", and it needs no modifier -- which matters, because
-    // this is the one door that must also open without a keyboard.
-    if (ev.special == freeink::SpecialKey::Escape) { openChapterPicker(); continue; }
+    // Escape opens the menu. It is unbound otherwise, it is the universal "step
+    // out", and it needs no modifier -- which matters, because this is the one
+    // door that must also open without a keyboard.
+    if (ev.special == freeink::SpecialKey::Escape) { openMenu(); continue; }
 
     if (ctrl && ev.keycode == 0x18) {          // Ctrl+U: USB transfer
       enterUsbTransfer();
