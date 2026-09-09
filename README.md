@@ -100,9 +100,9 @@ does not.
 
 Ways back, in the order you would reach for them: `scripts/select-slot.py
 --slot 1` from a computer; **CrossPoint's own Settings → SD Firmware Update**,
-which installs a `.bin` from the card and needs no computer at all — so keep a
-copy of `firmware.bin` on the card, because once you are stuck in the reader you
-cannot put one there; or, if nothing boots, the reset button and the ROM
+which installs a `.bin` from the card and needs no computer at all (verified on
+hardware) — so keep a copy of `firmware.bin` on the card, because once you are
+stuck in the reader you cannot put one there; or, if nothing boots, the reset button and the ROM
 download mode below.
 
 Full picture, including the one-shot-boot idea that measurement ruled out:

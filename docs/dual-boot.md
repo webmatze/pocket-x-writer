@@ -61,12 +61,14 @@ explicitly allowed, and ours carries none.
 > keeps the copy in step for you. A stale copy still works; it just restores an
 > older writer than the one you were using.
 
-**Status: derived from CrossPoint's source, not yet exercised end to end.** The
-mechanism and the guard were read in
-`src/activities/settings/SdFirmwareUpdateActivity.cpp` and
-`src/network/FirmwareFlasher.cpp`; the flow itself has not been run on this
-device. Test it once while you still have a cable, rather than the first time
-you need it.
+**Verified end to end on hardware, 2026-09-09.** Card ejected, Right held to
+reach CrossPoint, Settings → SD Firmware Update, image picked, and the writer
+came back on its own. Afterwards `otadata` selected `app1`, and slot 1 verified
+byte-for-byte against the same `firmware.bin`: 908112 bytes, digest matched.
+CrossPoint writes the image you give it, exactly.
+
+Walk it once yourself while a cable is still at hand. A rescue path nobody has
+taken is a hypothesis, the same way a backup nobody has restored is.
 
 ## 3. Emergency: the reset button
 
