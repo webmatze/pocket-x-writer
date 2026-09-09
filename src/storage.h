@@ -63,6 +63,13 @@ class Storage {
   // second book of the same name cannot quietly adopt the first one's chapters.
   bool createBook(const char* title, Book* out);
 
+  // Remember which chapter this book was last open at, and read it back. It
+  // lives in book.md rather than NVS: it is data about the book, so it should
+  // travel with the book -- and an NVS key is capped at 15 characters, well
+  // short of a slug. Returns 0 when nothing is remembered.
+  bool rememberChapter(uint16_t number);
+  uint16_t rememberedChapter();
+
   // Fill `out` with the chapters found, sorted by number. Returns how many.
   // Files that do not parse as chapters are skipped rather than guessed at.
   uint16_t listChapters(Chapter* out, uint16_t max);

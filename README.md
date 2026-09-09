@@ -78,7 +78,7 @@ full evidence.
 | `Ctrl+Backspace` | delete previous word |
 | `Esc` | menu: chapters, books — again to leave it |
 | `PageUp` / `PageDown` | previous / next chapter |
-| `Ctrl+N` | new chapter |
+| `Ctrl+N` | new chapter (also the last entry in the chapter list) |
 | `Ctrl+U` | mount the SD card on your computer |
 
 `Cmd` works wherever `Ctrl` does, so the shortcuts survive a Mac/Windows mode
@@ -172,10 +172,16 @@ it is flat, so a small `key: value` parser beats a JSON dependency.
 ```markdown
 ---
 title: Über den Dächern
+open: 3
 ---
 
 Notes below the block are yours; nothing here reads them.
 ```
+
+`open` is which chapter the book was last at, so switching books lands you back
+where you were rather than at chapter one. Updating it rewrites the block and
+copies your notes through untouched — and if book.md ever grows past the update
+buffer, the bookmark is skipped rather than risking them.
 
 Metadata never decides whether a book opens. No file, no block, or a mangled
 line costs one value and nothing else — a folder you create on the Mac is a book

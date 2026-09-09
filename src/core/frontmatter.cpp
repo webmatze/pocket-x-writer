@@ -36,7 +36,84 @@ uint32_t seqLen(const char* s) {
   return 1;
 }
 
+// Does the line at `p` declare `key`?
+bool lineHasKey(const char* p, const char* key) {
+  while (isSpace(*p)) ++p;
+  const char* k = key;
+  while (*k && *p && *p != ':' && lower(*p) == lower(*k)) { ++k; ++p; }
+  if (*k) return false;
+  while (isSpace(*p)) ++p;
+  return *p == ':';
+}
+
+// Append-only writer that refuses to overflow rather than truncating.
+struct Writer {
+  char* out;
+  uint32_t cap;
+  uint32_t n = 0;
+  bool ok = true;
+
+  void put(const char* s, uint32_t len) {
+    if (!ok) return;
+    if (n + len + 1 > cap) { ok = false; return; }
+    for (uint32_t i = 0; i < len; ++i) out[n + i] = s[i];
+    n += len;
+  }
+  void put(const char* s) {
+    uint32_t l = 0;
+    while (s[l]) ++l;
+    put(s, l);
+  }
+  void finish() { if (ok) out[n] = 0; else out[0] = 0; }
+};
+
 }  // namespace
+
+bool frontmatterSet(const char* text, const char* key, const char* value,
+                    char* out, uint32_t outSize) {
+  if (!out || outSize == 0) return false;
+  out[0] = 0;
+  if (!key || !*key) return false;
+  if (!text) text = "";
+  if (!value) value = "";
+
+  Writer w{out, outSize};
+
+  const char* p = text;
+  while (*p && isBlank(p) && !isFence(p)) p = nextLine(p);
+
+  if (!isFence(p)) {
+    // No block at all: put one in front of whatever is already there.
+    w.put("---\n");
+    w.put(key); w.put(": "); w.put(value); w.put("\n");
+    w.put("---\n\n");
+    w.put(text);
+    w.finish();
+    return w.ok;
+  }
+
+  const char* afterOpen = nextLine(p);
+  w.put(text, (uint32_t)(afterOpen - text));   // everything up to and including the fence
+
+  bool replaced = false;
+  const char* q = afterOpen;
+  for (; *q && !isFence(q); q = nextLine(q)) {
+    if (!replaced && lineHasKey(q, key)) {
+      w.put(key); w.put(": "); w.put(value); w.put("\n");
+      replaced = true;
+      continue;                                 // the old line goes
+    }
+    const char* nx = nextLine(q);
+    w.put(q, (uint32_t)(nx - q));
+  }
+  if (!replaced) { w.put(key); w.put(": "); w.put(value); w.put("\n"); }
+
+  if (*q) w.put(q);                             // closing fence and the body below
+  else w.put("---\n");                          // block was unterminated; close it
+
+  w.finish();
+  return w.ok;
+}
 
 bool frontmatterValue(const char* text, const char* key, char* out, uint32_t outSize) {
   if (!out || outSize == 0) return false;

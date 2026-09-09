@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <SDCardManager.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <Rtc.h>
@@ -302,6 +303,73 @@ uint16_t Storage::listBooks(Book* out, uint16_t max) {
       const Book t = out[j]; out[j] = out[j - 1]; out[j - 1] = t;
     }
   return n;
+}
+
+bool Storage::rememberChapter(uint16_t number) {
+  if (!mounted_ || !book_[0]) return false;
+  auto& sd = SDCardManager::getInstance();
+  char path[128], tmp[128], bak[128];
+  snprintf(path, sizeof(path), "%s/%s/book.md", kBooks, book_);
+  snprintf(tmp, sizeof(tmp), "%s/%s/book.tmp", kBooks, book_);
+  snprintf(bak, sizeof(bak), "%s/%s/book.bak", kBooks, book_);
+
+  // Static, not stack: together these are more than the Arduino task stack has
+  // to spare, and this runs from the loop task.
+  static char in[4096];
+  static char out[4608];
+  in[0] = 0;
+
+  if (sd.exists(path)) {
+    FsFile f = sd.open(path, O_RDONLY);
+    if (!f) return false;
+    const uint32_t size = (uint32_t)f.fileSize();
+    if (size + 1 > sizeof(in)) {
+      f.close();
+      // Notes longer than the buffer. Leave the file completely alone: losing
+      // someone's notes to remember a chapter number is a terrible trade.
+      Serial.println("[book] book.md too large to update; place not remembered");
+      return false;
+    }
+    const int got = f.read((uint8_t*)in, size);
+    f.close();
+    if (got < 0) return false;
+    in[got] = 0;
+  }
+
+  char value[12];
+  snprintf(value, sizeof(value), "%u", (unsigned)number);
+  if (!frontmatterSet(in, "open", value, out, sizeof(out))) return false;
+
+  // Same discipline as a chapter save: the previous version is only released
+  // once the new one is safely on the card.
+  if (sd.exists(tmp)) sd.remove(tmp);
+  {
+    FsFile f = sd.open(tmp, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!f) return false;
+    const uint32_t len = (uint32_t)strlen(out);
+    const bool ok = f.write((const uint8_t*)out, len) == (int)len;
+    f.sync();
+    f.close();
+    if (!ok) { sd.remove(tmp); return false; }
+  }
+  if (sd.exists(path)) {
+    if (sd.exists(bak)) sd.remove(bak);
+    if (!sd.rename(path, bak)) { sd.remove(tmp); return false; }
+  }
+  if (!sd.rename(tmp, path)) {
+    if (sd.exists(bak)) sd.rename(bak, path);
+    return false;
+  }
+  return true;
+}
+
+uint16_t Storage::rememberedChapter() {
+  if (!mounted_ || !book_[0]) return 0;
+  char head[1024], v[12];
+  if (!readBookMeta(book_, head, sizeof(head))) return 0;
+  if (!frontmatterValue(head, "open", v, sizeof(v))) return 0;
+  const int n = atoi(v);
+  return n > 0 && n < 10000 ? (uint16_t)n : 0;
 }
 
 bool Storage::createBook(const char* title, Book* out) {

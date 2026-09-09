@@ -396,6 +396,9 @@ void openChapter(uint16_t index) {
   gStorage.loadChapter(*gDoc, gChapters[index]);
   gWordsAtOpen = pocketx::countWords(gDoc->text());
   gScrollByte = 0;
+  // Where this book was left. Written here rather than on every autosave: this
+  // is the moment the answer actually changes.
+  gStorage.rememberChapter(gChapters[index].number);
 
   reportLayoutCost();
   // A whole new page of text: without a full flash the previous chapter stays
@@ -474,7 +477,6 @@ void closeOverlay() {
 }
 
 void openChapterPicker() {
-  if (!gChapterCount) return;
   for (uint16_t i = 0; i < gChapterCount; ++i) {
     char head[256];
     const char* src = nullptr;
@@ -486,7 +488,9 @@ void openChapterPicker() {
     if (!src || !pocketx::chapterLabel(src, gLabels[i], kLabelLen))
       snprintf(gLabels[i], kLabelLen, "Kapitel %u", (unsigned)gChapters[i].number);
   }
-  gList.reset(gChapterCount, gChapterIndex, overlayRows());
+  // One entry past the end adds to the list, exactly as the book list does --
+  // the same gesture in both places, and nothing to discover separately.
+  gList.reset((uint32_t)gChapterCount + 1, gChapterIndex, overlayRows());
   gOverlay = Overlay::Chapters;
   wakeOverlay();
 }
@@ -551,7 +555,13 @@ void switchToBook(uint16_t index) {
   }
   gChapterIndex = 0;
   if (gChapterCount) {
-    openChapter(0);          // the document is clean by now, so this cannot re-save
+    // Land where this book was left, not at its beginning -- switching away and
+    // back should feel like returning to a desk, not like starting over.
+    const uint16_t want = gStorage.rememberedChapter();
+    uint16_t idx = 0;
+    for (uint16_t i = 0; i < gChapterCount; ++i)
+      if (gChapters[i].number == want) { idx = i; break; }
+    openChapter(idx);        // the document is clean by now, so this cannot re-save
   } else {
     gDoc->clear();
     gDoc->markClean();
@@ -591,15 +601,16 @@ void overlayConfirm() {
   switch (gOverlay) {
     case Overlay::Menu: {
       const uint32_t pick = gList.selected();
-      if (pick == 0) { if (gChapterCount) openChapterPicker(); }
+      if (pick == 0) openChapterPicker();
       else openBookPicker();
       break;
     }
     case Overlay::Chapters: {
-      const uint16_t pick = (uint16_t)gList.selected();
+      const uint32_t pick = gList.selected();
       closeOverlay();
-      // openChapter() saves the current chapter first, so a switch cannot lose work.
-      if (pick != gChapterIndex) openChapter(pick);
+      // Both paths save the current chapter first, so neither can lose work.
+      if (pick >= gChapterCount) newChapter();
+      else if ((uint16_t)pick != gChapterIndex) openChapter((uint16_t)pick);
       break;
     }
     case Overlay::Books: {
@@ -654,8 +665,8 @@ void drawOverlay(uint8_t* fb) {
       // The book belongs here rather than in the status line: this is the moment
       // you are navigating, and the status line has no room to spare without
       // clipping the save state off its right end.
-      snprintf(title, sizeof(title), "%s · Kapitel %u/%u", gStorage.bookTitle(),
-               (unsigned)(gList.selected() + 1), (unsigned)gList.count());
+      snprintf(title, sizeof(title), "%s · %u Kapitel", gStorage.bookTitle(),
+               (unsigned)gChapterCount);
       break;
   }
   pocketx::drawText(canvas, kFont, kMargin, 34, title);
@@ -678,7 +689,10 @@ void drawOverlay(uint8_t* fb) {
         }
         break;
       default:
-        snprintf(row, sizeof(row), "%2u   %s", (unsigned)gChapters[i].number, gLabels[i]);
+        if (i < gChapterCount)
+          snprintf(row, sizeof(row), "%2u   %s", (unsigned)gChapters[i].number, gLabels[i]);
+        else
+          snprintf(row, sizeof(row), "+  Neues Kapitel ...");
         break;
     }
     pocketx::drawText(canvas, kFont, kMargin + 12, y, row);
@@ -1106,9 +1120,13 @@ void setup() {
         gChapterCount = gStorage.listChapters(gChapters, pocketx::Storage::kMaxChapters);
     }
     if (gChapterCount) {
-      // Resume where the writer left off: the last chapter is the one being
-      // worked on far more often than the first.
+      // Resume where the writer left off. book.md remembers which chapter that
+      // was; without an answer, the last one is being worked on far more often
+      // than the first.
+      const uint16_t want = gStorage.rememberedChapter();
       gChapterIndex = gChapterCount - 1;
+      for (uint16_t i = 0; i < gChapterCount; ++i)
+        if (gChapters[i].number == want) { gChapterIndex = i; break; }
       gStorage.loadChapter(doc, gChapters[gChapterIndex]);
       gWordsAtOpen = pocketx::countWords(doc.text());
       reportLayoutCost();

@@ -34,4 +34,17 @@ namespace pocketx {
 // always NUL-terminated, and truncation never splits a UTF-8 character.
 bool frontmatterValue(const char* text, const char* key, char* out, uint32_t outSize);
 
+// Set (or add) a key, writing the whole updated document to `out`.
+//
+// Everything outside the block is copied through untouched. The notes below it
+// belong to the writer, and eating them to remember a chapter number would be a
+// poor trade. A document with no block gets one; an unterminated block gets its
+// closing fence.
+//
+// Returns false when `out` is too small, leaving it EMPTY rather than truncated:
+// a half-written metadata file is worse than an unchanged one, and the caller
+// can tell the difference.
+bool frontmatterSet(const char* text, const char* key, const char* value,
+                    char* out, uint32_t outSize);
+
 }  // namespace pocketx

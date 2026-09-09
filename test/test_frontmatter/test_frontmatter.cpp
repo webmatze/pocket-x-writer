@@ -121,6 +121,84 @@ void test_truncation_never_splits_a_utf8_character() {
   }
 }
 
+
+// --- writing ----------------------------------------------------------------
+//
+// The promise the file makes is that the notes below the block belong to the
+// writer. Every one of these is really about that.
+
+void test_set_replaces_an_existing_key() {
+  char b[512];
+  TEST_ASSERT_TRUE(frontmatterSet(kBook, "title", "Neuer Titel", b, sizeof(b)));
+  char v[64];
+  TEST_ASSERT_TRUE(frontmatterValue(b, "title", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Neuer Titel", v);
+  // The other keys are untouched.
+  TEST_ASSERT_TRUE(frontmatterValue(b, "goal", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("1000", v);
+  TEST_ASSERT_TRUE(frontmatterValue(b, "author", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Mathias", v);
+}
+
+void test_set_keeps_the_notes_below_the_block() {
+  char b[512];
+  TEST_ASSERT_TRUE(frontmatterSet(kBook, "open", "3", b, sizeof(b)));
+  TEST_ASSERT_NOT_NULL(strstr(b, "Freie Notizen, die uns nichts angehen."));
+}
+
+void test_set_adds_a_key_that_was_not_there() {
+  char b[512];
+  TEST_ASSERT_TRUE(frontmatterSet(kBook, "open", "7", b, sizeof(b)));
+  char v[64];
+  TEST_ASSERT_TRUE(frontmatterValue(b, "open", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("7", v);
+  TEST_ASSERT_TRUE(frontmatterValue(b, "title", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Über den Dächern", v);
+}
+
+void test_set_creates_a_block_when_there_is_none() {
+  char b[512];
+  TEST_ASSERT_TRUE(frontmatterSet("Nur Notizen, kein Block.\n", "title", "Gefunden", b, sizeof(b)));
+  char v[64];
+  TEST_ASSERT_TRUE(frontmatterValue(b, "title", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Gefunden", v);
+  TEST_ASSERT_NOT_NULL(strstr(b, "Nur Notizen, kein Block."));
+}
+
+void test_set_on_empty_input_yields_a_readable_block() {
+  char b[256];
+  TEST_ASSERT_TRUE(frontmatterSet("", "title", "Leer gestartet", b, sizeof(b)));
+  char v[64];
+  TEST_ASSERT_TRUE(frontmatterValue(b, "title", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Leer gestartet", v);
+}
+
+void test_set_closes_an_unterminated_block() {
+  char b[256];
+  TEST_ASSERT_TRUE(frontmatterSet("---\ntitle: Offen\n", "open", "2", b, sizeof(b)));
+  char v[64];
+  TEST_ASSERT_TRUE(frontmatterValue(b, "open", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("2", v);
+  TEST_ASSERT_TRUE(frontmatterValue(b, "title", v, sizeof(v)));
+  TEST_ASSERT_EQUAL_STRING("Offen", v);
+}
+
+// Round-tripping must be stable: writing the same value twice cannot keep
+// growing the file with duplicate lines.
+void test_setting_twice_does_not_duplicate_the_key() {
+  char a[512], b[512];
+  TEST_ASSERT_TRUE(frontmatterSet(kBook, "open", "3", a, sizeof(a)));
+  TEST_ASSERT_TRUE(frontmatterSet(a, "open", "3", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING(a, b);
+}
+
+// Rather no change at all than a half-written metadata file.
+void test_too_small_a_buffer_yields_nothing_not_a_fragment() {
+  char b[16];
+  TEST_ASSERT_FALSE(frontmatterSet(kBook, "title", "Viel zu lang für den Puffer", b, sizeof(b)));
+  TEST_ASSERT_EQUAL_STRING("", b);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_reads_a_value);
@@ -135,5 +213,13 @@ int main(int, char**) {
   RUN_TEST(test_damage_costs_a_value_not_the_book);
   RUN_TEST(test_a_broken_line_does_not_hide_the_next_one);
   RUN_TEST(test_truncation_never_splits_a_utf8_character);
+  RUN_TEST(test_set_replaces_an_existing_key);
+  RUN_TEST(test_set_keeps_the_notes_below_the_block);
+  RUN_TEST(test_set_adds_a_key_that_was_not_there);
+  RUN_TEST(test_set_creates_a_block_when_there_is_none);
+  RUN_TEST(test_set_on_empty_input_yields_a_readable_block);
+  RUN_TEST(test_set_closes_an_unterminated_block);
+  RUN_TEST(test_setting_twice_does_not_duplicate_the_key);
+  RUN_TEST(test_too_small_a_buffer_yields_nothing_not_a_fragment);
   return UNITY_END();
 }
