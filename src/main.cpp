@@ -434,17 +434,29 @@ void newChapter() {
 // `while` loop here would switch all of that off silently, and the first symptom
 // would be a device that never sleeps while a menu is open.
 
-enum class Overlay : uint8_t { None, Menu, Chapters, Books, Keyboard, Prompt };
+enum class Overlay : uint8_t { None, Menu, Chapters, Books, Keyboard, Confirm, Prompt };
 Overlay gOverlay = Overlay::None;
 pocketx::ListState gList;
 
 // The menu is the level above a single book. Kept as a plain array because it
 // is fixed: entries appear here when they exist, not before.
-const char* const kMenuItems[] = {"Kapitel ...", "Bücher ...", "Tastatur ..."};
+const char* const kMenuItems[] = {"Kapitel ...", "Bücher ...", "Tastatur ...", "Reader starten"};
 constexpr uint16_t kMenuCount = sizeof(kMenuItems) / sizeof(kMenuItems[0]);
 
 pocketx::Book gBooks[pocketx::Storage::kMaxBooks];
 uint16_t gBookCount = 0;
+
+// Defined further down; the menu needs it before the compiler gets there.
+void bootOtherSlot();
+
+// A yes/no question for the few actions that are hard to take back. The slot
+// switch is the whole reason it exists: leaving for the other firmware is a trip
+// that ends at a computer or in that firmware's own menus.
+enum class ConfirmFor : uint8_t { None, BootReader };
+ConfirmFor gConfirmFor = ConfirmFor::None;
+const char* gConfirmTitle = "";
+const char* gConfirmLine1 = "";
+const char* gConfirmLine2 = "";
 
 // One row of the keyboard screen. The list is flat and rebuilt whenever the
 // state changes, because what belongs on it depends entirely on that state:
@@ -574,6 +586,20 @@ void pollKeyboardScreen() {
   wakeOverlay();
 }
 
+void openConfirm(const char* title, const char* l1, const char* l2, ConfirmFor what) {
+  gConfirmTitle = title;
+  gConfirmLine1 = l1;
+  gConfirmLine2 = l2;
+  gConfirmFor = what;
+  gList.reset(2, 1, overlayRows());   // start on "Abbrechen": the harmless one
+  gOverlay = Overlay::Confirm;
+  wakeOverlay();
+}
+
+// Chapter navigation, shared by the nav keys and by PageUp/PageDown.
+void prevChapter() { if (gChapterIndex > 0) openChapter((uint16_t)(gChapterIndex - 1)); }
+void nextChapter() { if (gChapterIndex + 1 < gChapterCount) openChapter((uint16_t)(gChapterIndex + 1)); }
+
 void openMenu() {
   // One past the fixed entries is "close": every entry here opens something, so
   // without it Left alone could enter the menu and not leave it.
@@ -690,6 +716,8 @@ void overlayBack() {
     case Overlay::Chapters:
     case Overlay::Books:
     case Overlay::Keyboard:
+    case Overlay::Confirm:
+      gConfirmFor = ConfirmFor::None;
       openMenu();
       break;
     case Overlay::Prompt: {
@@ -711,6 +739,9 @@ void overlayConfirm() {
       if (pick == 0) openChapterPicker();
       else if (pick == 1) openBookPicker();
       else if (pick == 2) openKeyboardScreen();
+      else if (pick == 3)
+        openConfirm("Reader starten?", "Die andere Firmware startet.",
+                    "Zurück führt nur über deren Menü.", ConfirmFor::BootReader);
       else closeOverlay();
       break;
     }
@@ -765,6 +796,18 @@ void overlayConfirm() {
       wakeOverlay();
       break;
     }
+    case Overlay::Confirm: {
+      const bool yes = gList.selected() == 0;
+      const ConfirmFor what = gConfirmFor;
+      gConfirmFor = ConfirmFor::None;
+      if (yes && what == ConfirmFor::BootReader) {
+        if (gDoc->dirty()) saveCurrentChapter();   // the reboot does not come back
+        bootOtherSlot();
+        return;
+      }
+      openMenu();
+      break;
+    }
     case Overlay::Prompt: promptConfirm(); break;
     default: break;
   }
@@ -794,10 +837,33 @@ void drawPrompt(const pocketx::Canvas& canvas) {
                     "Enter bestätigt · Esc oder Home bricht ab");
 }
 
+void drawConfirm(const pocketx::Canvas& canvas) {
+  pocketx::drawText(canvas, kFont, kMargin, 34, gConfirmTitle);
+  pocketx::fillRect(canvas, pocketx::Rect{kMargin, 44, (int32_t)kTextWidth, 1}, true);
+
+  int32_t y = kTextTop + kFont.ascent;
+  pocketx::drawText(canvas, kFont, kMargin, y, gConfirmLine1);
+  y += kFont.yAdvance;
+  pocketx::drawText(canvas, kFont, kMargin, y, gConfirmLine2);
+  y += kFont.yAdvance * 2;
+
+  const char* const items[2] = {"Ja", "Abbrechen"};
+  for (uint32_t i = 0; i < 2; ++i) {
+    pocketx::drawText(canvas, kFont, kMargin + 12, y, items[i]);
+    if (i == gList.selected())
+      pocketx::invertRect(canvas, pocketx::Rect{kMargin, y - kFont.ascent,
+                                                (int32_t)kTextWidth, kFont.yAdvance - 2});
+    y += kFont.yAdvance;
+  }
+  pocketx::drawText(canvas, kFont, kMargin, kH - 12,
+                    "Links: runter, lang bestätigen · Rechts: hoch · Home: zurück");
+}
+
 void drawOverlay(uint8_t* fb) {
   const pocketx::Canvas canvas{fb, kW, kH, kRowBytes};
   memset(fb, 0xFF, (uint32_t)kRowBytes * kH);
   if (gOverlay == Overlay::Prompt) { drawPrompt(canvas); return; }
+  if (gOverlay == Overlay::Confirm) { drawConfirm(canvas); return; }
 
   char title[96];
   switch (gOverlay) {
@@ -940,11 +1006,12 @@ void applyLight() {
   Serial.printf("[light] %u%%\n", kLightSteps[gLightStep]);
 }
 
-// The Left key carries two gestures so the menu is reachable with no keyboard
-// attached -- the one case where a keyboard chord would be useless, since the
-// menu is where you go to pair one. Nothing else changes meaning: Right stays
-// the slot switch, Power stays sleep, and a short Left press is still the
-// frontlight, which you want available in a dark menu.
+// Left, in the editor: a tap steps back a chapter, a hold cycles the frontlight.
+// The light is still on a physical key you can find without looking, which was
+// always the point -- held rather than tapped, because paging through a book is
+// the far more frequent gesture and deserves the cheaper one.
+//
+// In a list: tap moves down, hold confirms.
 void pollLightButton() {
   static bool wasDown = false;
   static uint32_t downAt = 0;
@@ -963,16 +1030,18 @@ void pollLightButton() {
     // a title without a keyboard -- so the long press is the way out instead.
     if (gOverlay == Overlay::Prompt) overlayBack();
     else if (gOverlay != Overlay::None) overlayConfirm();
-    else openMenu();
+    else {
+      gLightStep = (uint8_t)((gLightStep + 1) % (sizeof(kLightSteps) / sizeof(kLightSteps[0])));
+      applyLight();
+    }
   }
 
   if (!down && wasDown && !longFired && now - downAt > 30) {   // debounce
     if (gOverlay != Overlay::None && gOverlay != Overlay::Prompt) {
       gList.next();
       wakeOverlay();
-    } else {
-      gLightStep = (uint8_t)((gLightStep + 1) % (sizeof(kLightSteps) / sizeof(kLightSteps[0])));
-      applyLight();
+    } else if (gOverlay == Overlay::None) {
+      prevChapter();
     }
   }
   if (down) gLastActivityAt = now;
@@ -1006,11 +1075,12 @@ void bootOtherSlot() {
   esp_restart();
 }
 
-// Right: a short press moves UP a list, a 2 s hold still switches firmware slots
-// -- but only from the editor. Inside a menu the hold is deliberately dead:
-// holding a moment too long while navigating should not drop anyone into the
-// other firmware, from which there is no way back without a computer or a trip
-// through its own menus.
+// Right, in the editor: a tap steps forward a chapter, a hold opens the menu.
+// In a list: tap moves up.
+//
+// The slot switch used to live on this hold. It is a menu entry now, behind a
+// yes/no question -- a trip into the other firmware that ends at a computer is
+// too much to hang on a gesture anyone can make by accident while paging.
 //
 // Left goes down and Right goes up, which is the inverse of the SDK's page-turn
 // mapping for these two keys. That is on purpose: Left was already "next" before
@@ -1048,13 +1118,15 @@ void pollSwitchButton() {
 
   if (down && !wasDown) { downSince = now; longFired = false; }
 
-  if (down && !longFired && gOverlay == Overlay::None && now - downSince >= kHoldMs) {
+  if (down && !longFired && gOverlay == Overlay::None && now - downSince >= kLongPressMs) {
     longFired = true;
-    bootOtherSlot();
+    openMenu();
   }
 
   if (!down && wasDown && !longFired && now - downSince > 30) {   // debounce
-    if (gOverlay != Overlay::None && gOverlay != Overlay::Prompt) {
+    if (gOverlay == Overlay::None) {
+      nextChapter();
+    } else if (gOverlay != Overlay::Prompt) {
       gList.prev();
       wakeOverlay();
     }
@@ -1537,12 +1609,8 @@ void loop() {
           ctrl ? gDoc->moveToEnd(shift) : gDoc->moveToLineEnd(shift);     changed = true; break;
         // Page keys move between chapters -- the navigation a book needs more
         // than paging within one chapter, which the arrows already cover.
-        case freeink::SpecialKey::PageUp:
-          if (gChapterIndex > 0) openChapter(gChapterIndex - 1);
-          break;
-        case freeink::SpecialKey::PageDown:
-          if (gChapterIndex + 1 < gChapterCount) openChapter(gChapterIndex + 1);
-          break;
+        case freeink::SpecialKey::PageUp:   prevChapter(); break;
+        case freeink::SpecialKey::PageDown: nextChapter(); break;
         case freeink::SpecialKey::None: {
           if (ctrl) {
             // An unbound chord would otherwise disappear without trace, which is
