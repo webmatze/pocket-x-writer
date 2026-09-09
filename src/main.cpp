@@ -22,6 +22,7 @@
 #include <SDCardManager.h>
 #include <BatteryMonitor.h>
 #include <FrontlightManager.h>
+#include <InputManager.h>
 #include <PowerManager.h>
 #include <Preferences.h>
 #include <Rtc.h>
@@ -107,6 +108,12 @@ constexpr uint16_t kUndoRecords = 512;
 
 pocketx::Document* gDoc = nullptr;
 pocketx::Storage gStorage;
+
+// Only for the capacitive Home key below the panel. Screen touches are read and
+// deliberately thrown away: the objection to touch was always accidental input
+// where the hands rest, and that is the writing surface, not a dedicated key
+// underneath it.
+InputManager gInput;
 
 constexpr const char* kBookTitle = "Mein Buch";
 // A daily word goal, the number a writer actually steers by.
@@ -994,6 +1001,29 @@ void bootOtherSlot() {
 // deliberately dead: someone is learning "Right means back" there, and holding
 // a moment too long should not drop them into the other firmware, from which
 // there is no way back without a computer or a trip through its own menus.
+// The Home key is the obvious place for "back" -- it is a labelled key sitting
+// under the screen, where the Right nav key's short press is something you have
+// to be told about. Right keeps doing it too: the Home key needs the GT911
+// powered, so it is a convenience layered on a fallback that costs nothing,
+// never a dependency.
+//
+// Tap in the editor opens the menu, tap in a menu steps back out. One gesture,
+// the way a home button is expected to behave.
+void pollHomeKey() {
+  // Throttled: this polls I2C, and no human taps faster than this.
+  static uint32_t last = 0;
+  const uint32_t now = millis();
+  if (now - last < 25) return;
+  last = now;
+
+  gInput.update();
+  if (!gInput.wasHomeKeyTapped()) return;
+  Serial.println("[input] home key");
+  gLastActivityAt = now;
+  if (gOverlay == Overlay::None) openMenu();
+  else overlayBack();
+}
+
 void pollSwitchButton() {
   static bool wasDown = false;
   static uint32_t downSince = 0;
@@ -1305,6 +1335,12 @@ void setup() {
   gLightStep = gPrefs.getUChar("light", 0);
   if (gLightStep >= sizeof(kLightSteps) / sizeof(kLightSteps[0])) gLightStep = 0;
   gLight.setBrightness(kLightSteps[gLightStep]);
+  // After holdPowerRails(): the GT911 sits on a switched rail that needs GPIO1
+  // asserted before it answers at all.
+  gInput.begin();
+  Serial.printf("[input] home key %s\n",
+                BoardConfig::hasHomeKey() ? "available" : "not on this board");
+
   if (gRtc.begin()) {
     freeink::Rtc::DateTime t;
     if (gRtc.now(t))
@@ -1348,6 +1384,7 @@ void loop() {
   pollLightButton();
   pollPowerButton();
   pollKeyboardScreen();
+  pollHomeKey();
 
   // Idle long enough to be gone rather than thinking.
   if (!gUsbMode && gLastActivityAt && millis() - gLastActivityAt >= kSleepAfterMs) sleepNow();
