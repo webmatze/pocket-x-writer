@@ -112,9 +112,28 @@ behind by TinyUSB is the example that bites. When the device is running fine but
 has vanished from USB entirely, this button is the only thing short of a flat
 battery that clears it.
 
-Holding **Left** (GPIO0, the boot strap) while pressing it should drop the chip
-into the ROM download mode — the recovery path if a firmware ever fails to boot.
-Untested here; the strapping behaviour is standard for the ESP32-S3.
+Holding **Left** (GPIO0, the boot strap) while pressing it drops the chip into
+the ROM download mode — the recovery path when a firmware fails to boot at all.
+Verified on hardware:
+
+```
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x23 (DOWNLOAD(USB/UART0))
+waiting for download
+```
+
+From there, with no application running, `esptool` reads and writes flash
+normally: 32 KB of bootloader and partition table read back byte-identical to
+the backup, and an 8 KB write verified with a matching digest. That is the whole
+recovery path, proven end to end.
+
+**It looks exactly like nothing happening** — no screen change, and the ROM's own
+banner goes out before USB re-enumerates, so the host never sees it. The way to
+tell is `esptool --before no-reset`: if it connects, the chip is already
+listening. Leave with a press of the reset button; a reset over USB lands back
+in download mode.
+
+Hold Left through the *release* of the reset button, not just the press: GPIO0 is
+sampled as reset is released.
 
 Every boot now prints why it happened:
 
