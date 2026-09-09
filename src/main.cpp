@@ -1006,7 +1006,8 @@ void applyLight() {
   Serial.printf("[light] %u%%\n", kLightSteps[gLightStep]);
 }
 
-// Left, in the editor: a tap steps back a chapter, a hold cycles the frontlight.
+// Left, in the editor: a tap steps FORWARD a chapter, a hold cycles the
+// frontlight.
 // The light is still on a physical key you can find without looking, which was
 // always the point -- held rather than tapped, because paging through a book is
 // the far more frequent gesture and deserves the cheaper one.
@@ -1041,7 +1042,7 @@ void pollLightButton() {
       gList.next();
       wakeOverlay();
     } else if (gOverlay == Overlay::None) {
-      prevChapter();
+      nextChapter();
     }
   }
   if (down) gLastActivityAt = now;
@@ -1075,17 +1076,19 @@ void bootOtherSlot() {
   esp_restart();
 }
 
-// Right, in the editor: a tap steps forward a chapter, a hold opens the menu.
+// Right, in the editor: a tap steps BACK a chapter, a hold opens the menu.
 // In a list: tap moves up.
 //
 // The slot switch used to live on this hold. It is a menu entry now, behind a
 // yes/no question -- a trip into the other firmware that ends at a computer is
 // too much to hang on a gesture anyone can make by accident while paging.
 //
-// Left goes down and Right goes up, which is the inverse of the SDK's page-turn
-// mapping for these two keys. That is on purpose: Left was already "next" before
-// Right did anything, and moving learned behaviour to match a convention nobody
-// sees is a poor trade.
+// Left goes forward and down, Right goes back and up -- the same meaning in the
+// editor and in every list. The device is held in landscape, which puts this key
+// physically at the TOP, so "up" is where the thumb already thinks it is going.
+//
+// That is the inverse of the SDK's page-turn mapping for these two keys, which
+// assumes the portrait orientation a reader is held in. Ours is not.
 // The Home key is the obvious place for "back" -- it is a labelled key sitting
 // under the screen, where the Right nav key's short press is something you have
 // to be told about. Right keeps doing it too: the Home key needs the GT911
@@ -1125,7 +1128,7 @@ void pollSwitchButton() {
 
   if (!down && wasDown && !longFired && now - downSince > 30) {   // debounce
     if (gOverlay == Overlay::None) {
-      nextChapter();
+      prevChapter();
     } else if (gOverlay != Overlay::Prompt) {
       gList.prev();
       wakeOverlay();
