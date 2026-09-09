@@ -95,9 +95,9 @@ switch on the keyboard.
 |---|---|
 | **Left** (short press) | cycle frontlight: off → 12 → 30 → 60 → 100% |
 | **Left** (hold ~0.6 s) | open the menu — in a list: open the selected entry |
-| **Left** (short, in the list) | next entry (wraps) |
+| **Left** (short, in a list) | down one entry (wraps) |
+| **Right** (short, in a list) | up one entry (wraps) |
 | **Home** (capacitive, below the screen) | open the menu — in a menu: step back |
-| **Right** (short press) | step back out of a menu |
 | **Right** (hold 2 s, from the editor) | reboot into the other firmware slot — **one way**, see below |
 | **Power** (short press) | sleep now — saves first, then shows a sleep screen |
 | **Power** (while asleep) | wake |
@@ -354,8 +354,8 @@ See [`docs/panel-and-latency.md`](docs/panel-and-latency.md).
   read and thrown away.
 - **The Home key's power cost is unmeasured.** It needs the GT911 powered while
   the device is awake; deep sleep is unaffected, since the sleep path switches
-  that rail off. Every menu action it performs is also on a physical nav key, so
-  it can go without losing a function.
+  that rail off. Every screen also carries its own way out as a list entry, so
+  the Home key is a shortcut rather than the only exit.
 
 ---
 

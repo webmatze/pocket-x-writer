@@ -547,6 +547,10 @@ void buildKeyboardList() {
   }
 
   if (ble.pairedCount()) add("Kopplungen löschen", 3, nullptr);
+  // Confirming any other entry here leaves you on this screen, so the way out
+  // has to be one of the entries. With it, the Left key alone can leave every
+  // screen -- the Home key stays a convenience rather than the only exit.
+  add("Zurück", 4, nullptr);
 }
 
 void openKeyboardScreen() {
@@ -571,7 +575,9 @@ void pollKeyboardScreen() {
 }
 
 void openMenu() {
-  gList.reset(kMenuCount, 0, overlayRows());
+  // One past the fixed entries is "close": every entry here opens something, so
+  // without it Left alone could enter the menu and not leave it.
+  gList.reset((uint32_t)kMenuCount + 1, 0, overlayRows());
   gOverlay = Overlay::Menu;
   wakeOverlay();
 }
@@ -704,7 +710,8 @@ void overlayConfirm() {
       const uint32_t pick = gList.selected();
       if (pick == 0) openChapterPicker();
       else if (pick == 1) openBookPicker();
-      else openKeyboardScreen();
+      else if (pick == 2) openKeyboardScreen();
+      else closeOverlay();
       break;
     }
     case Overlay::Chapters: {
@@ -738,6 +745,9 @@ void overlayConfirm() {
           gConnectStartedAt = millis();
           ble.connect(gKb[pick].addr);
           break;
+        case 4:
+          overlayBack();
+          return;
         case 3: {
           // Copy each address out before forgetting it: the list shifts under
           // the iteration otherwise.
@@ -781,7 +791,7 @@ void drawPrompt(const pocketx::Canvas& canvas) {
   pocketx::fillRect(canvas, pocketx::Rect{x + 1, y - kFont.ascent + 3, 5, kFont.ascent - 1}, true);
 
   pocketx::drawText(canvas, kFont, kMargin, kH - 12,
-                    "Enter bestätigt · Esc oder Rechts bricht ab");
+                    "Enter bestätigt · Esc oder Home bricht ab");
 }
 
 void drawOverlay(uint8_t* fb) {
@@ -821,7 +831,7 @@ void drawOverlay(uint8_t* fb) {
     char row[96];
     switch (gOverlay) {
       case Overlay::Menu:
-        snprintf(row, sizeof(row), "%s", kMenuItems[i]);
+        snprintf(row, sizeof(row), "%s", i < kMenuCount ? kMenuItems[i] : "Schließen");
         break;
       case Overlay::Keyboard:
         snprintf(row, sizeof(row), "%s", gKb[i].label);
@@ -849,7 +859,7 @@ void drawOverlay(uint8_t* fb) {
     y += kFont.yAdvance;
   }
 
-  const char* hint = "Links: weiter, lang öffnen · Rechts: zurück";
+  const char* hint = "Links: runter, lang öffnen · Rechts: hoch · Home: zurück";
   if (gOverlay == Overlay::Keyboard) {
     auto& ble = freeink::BleKeyboardHost::getInstance();
     if (gKbScanning) hint = "Suche läuft, einen Moment ...";
@@ -951,7 +961,7 @@ void pollLightButton() {
     longFired = true;
     // In a text prompt there is nothing a button can confirm -- you cannot type
     // a title without a keyboard -- so the long press is the way out instead.
-    if (gOverlay == Overlay::Prompt) closeOverlay();
+    if (gOverlay == Overlay::Prompt) overlayBack();
     else if (gOverlay != Overlay::None) overlayConfirm();
     else openMenu();
   }
@@ -996,11 +1006,16 @@ void bootOtherSlot() {
   esp_restart();
 }
 
-// Right: a short press steps back out of a menu, a 2 s hold still switches
-// firmware slots -- but only from the editor. Inside a menu the hold is
-// deliberately dead: someone is learning "Right means back" there, and holding
-// a moment too long should not drop them into the other firmware, from which
-// there is no way back without a computer or a trip through its own menus.
+// Right: a short press moves UP a list, a 2 s hold still switches firmware slots
+// -- but only from the editor. Inside a menu the hold is deliberately dead:
+// holding a moment too long while navigating should not drop anyone into the
+// other firmware, from which there is no way back without a computer or a trip
+// through its own menus.
+//
+// Left goes down and Right goes up, which is the inverse of the SDK's page-turn
+// mapping for these two keys. That is on purpose: Left was already "next" before
+// Right did anything, and moving learned behaviour to match a convention nobody
+// sees is a poor trade.
 // The Home key is the obvious place for "back" -- it is a labelled key sitting
 // under the screen, where the Right nav key's short press is something you have
 // to be told about. Right keeps doing it too: the Home key needs the GT911
@@ -1039,9 +1054,9 @@ void pollSwitchButton() {
   }
 
   if (!down && wasDown && !longFired && now - downSince > 30) {   // debounce
-    if (gOverlay != Overlay::None) {
-      overlayBack();
-      gLastActivityAt = now;
+    if (gOverlay != Overlay::None && gOverlay != Overlay::Prompt) {
+      gList.prev();
+      wakeOverlay();
     }
   }
   if (down) gLastActivityAt = now;
