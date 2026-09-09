@@ -103,10 +103,12 @@ switch on the keyboard.
 | **Power** (while asleep) | wake |
 | **Reset** (small button on the top edge) | hardware reset — see below |
 
-Switching slots is **one way from the device**. `esp_ota_set_boot_partition()`
-is permanent, and hold-Right-to-switch is a feature of *this* firmware, so
-whatever is in the other slot has no reason to offer the reverse — CrossPoint
-does not.
+Switching slots is **one way from the device**, and it lives in the menu as
+**Reader starten**, behind a yes/no question — a trip that ends at a computer is
+too much to hang on a key hold anyone can trigger by accident while paging.
+`esp_ota_set_boot_partition()` is permanent, and the way back is a feature of
+*this* firmware, so whatever is in the other slot has no reason to offer the
+reverse — CrossPoint does not.
 
 Ways back, in the order you would reach for them: `scripts/select-slot.py
 --slot 1` from a computer; **CrossPoint's own Settings → SD Firmware Update**,
