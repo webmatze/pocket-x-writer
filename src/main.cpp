@@ -665,6 +665,32 @@ void promptConfirm() {
   closeOverlay();
 }
 
+// One level up, rather than straight out. Reached by Esc and by a short press of
+// the Right key -- without which a device with no keyboard attached could enter
+// the keyboard screen and never leave it, since nothing there closes the
+// overlay. That screen is precisely the one that has to work without a keyboard.
+void overlayBack() {
+  switch (gOverlay) {
+    case Overlay::Menu:
+      closeOverlay();
+      break;
+    case Overlay::Chapters:
+    case Overlay::Books:
+    case Overlay::Keyboard:
+      openMenu();
+      break;
+    case Overlay::Prompt: {
+      const PromptFor purpose = gPromptFor;
+      gPromptFor = PromptFor::None;
+      if (purpose == PromptFor::NewBook) openBookPicker();
+      else closeOverlay();
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 void overlayConfirm() {
   switch (gOverlay) {
     case Overlay::Menu: {
@@ -747,7 +773,8 @@ void drawPrompt(const pocketx::Canvas& canvas) {
   const int32_t x = kMargin + (int32_t)pocketx::measureText(kFont, buf);
   pocketx::fillRect(canvas, pocketx::Rect{x + 1, y - kFont.ascent + 3, 5, kFont.ascent - 1}, true);
 
-  pocketx::drawText(canvas, kFont, kMargin, kH - 12, "Enter bestätigt · Esc bricht ab");
+  pocketx::drawText(canvas, kFont, kMargin, kH - 12,
+                    "Enter bestätigt · Esc oder Rechts bricht ab");
 }
 
 void drawOverlay(uint8_t* fb) {
@@ -815,7 +842,7 @@ void drawOverlay(uint8_t* fb) {
     y += kFont.yAdvance;
   }
 
-  const char* hint = "Enter öffnet · Esc zurück · Links: weiter / lang öffnen";
+  const char* hint = "Links: weiter, lang öffnen · Rechts: zurück";
   if (gOverlay == Overlay::Keyboard) {
     auto& ble = freeink::BleKeyboardHost::getInstance();
     if (gKbScanning) hint = "Suche läuft, einen Moment ...";
@@ -962,12 +989,33 @@ void bootOtherSlot() {
   esp_restart();
 }
 
+// Right: a short press steps back out of a menu, a 2 s hold still switches
+// firmware slots -- but only from the editor. Inside a menu the hold is
+// deliberately dead: someone is learning "Right means back" there, and holding
+// a moment too long should not drop them into the other firmware, from which
+// there is no way back without a computer or a trip through its own menus.
 void pollSwitchButton() {
+  static bool wasDown = false;
   static uint32_t downSince = 0;
-  if (digitalRead(kSwitchButton) != LOW) { downSince = 0; return; }
+  static bool longFired = false;
+  const bool down = digitalRead(kSwitchButton) == LOW;
   const uint32_t now = millis();
-  if (downSince == 0) downSince = now;
-  else if (now - downSince >= kHoldMs) { downSince = 0; bootOtherSlot(); }
+
+  if (down && !wasDown) { downSince = now; longFired = false; }
+
+  if (down && !longFired && gOverlay == Overlay::None && now - downSince >= kHoldMs) {
+    longFired = true;
+    bootOtherSlot();
+  }
+
+  if (!down && wasDown && !longFired && now - downSince > 30) {   // debounce
+    if (gOverlay != Overlay::None) {
+      overlayBack();
+      gLastActivityAt = now;
+    }
+  }
+  if (down) gLastActivityAt = now;
+  wasDown = down;
 }
 
 // Power key: sleep on a press, the e-reader convention, so the sleep screen is
@@ -1350,7 +1398,7 @@ void loop() {
     if (gOverlay == Overlay::Prompt) {
       switch (ev.special) {
         case freeink::SpecialKey::Enter:     overlayConfirm(); continue;
-        case freeink::SpecialKey::Escape:    closeOverlay();   continue;
+        case freeink::SpecialKey::Escape:    overlayBack();    continue;
         case freeink::SpecialKey::Backspace:
           ctrl ? gPrompt.deleteWordBefore() : gPrompt.backspace(); break;
         case freeink::SpecialKey::Delete:    gPrompt.deleteForward(); break;
@@ -1381,7 +1429,7 @@ void loop() {
         case freeink::SpecialKey::Home:     gList.moveTo(0);  break;
         case freeink::SpecialKey::End:      gList.moveTo(gList.count() - 1); break;
         case freeink::SpecialKey::Enter:    overlayConfirm(); continue;
-        case freeink::SpecialKey::Escape:   closeOverlay();   continue;
+        case freeink::SpecialKey::Escape:   overlayBack();     continue;
         default: continue;                  // ignore text while the list is up
       }
       wakeOverlay();
